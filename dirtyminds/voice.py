@@ -3,16 +3,20 @@
 One worker, bounded requests, and cancellation prevent overlapping/stale speech.
 No shell audio player, FFmpeg, API SDK, or key-bearing logs are needed.
 """
+import copy
 import hashlib
 import io
 import json
 from pathlib import Path
 import queue
+import re
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 import wave
+
+from .audio import PLAYBACK_VERSION, prepare_playback_pcm
 
 
 class VoiceError(Exception):
@@ -25,33 +29,107 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def whisper_phrases(text, max_words=10):
+    """Keep each whispered request short; preserve all words and punctuation."""
+    phrases = []
+    for sentence in re.split(r"(?<=[.!?;])\s+|\n+", text.strip()):
+        words = sentence.split()
+        for start in range(0, len(words), max_words):
+            phrases.append(" ".join(words[start:start + max_words]))
+    return phrases
+
+
 class ElevenVoice:
-    def __init__(self, api_key, voice_id, model_id, cache_dir):
+    def __init__(self, api_key, voice_id, model_id, cache_dir, *, whisper=False, whisper_model_id="eleven_v3", whisper_pause_ms=900):
         self.api_key = api_key
         self.voice_id = voice_id
         self.model_id = model_id
         self.cache_dir = Path(cache_dir)
+        self.whisper = whisper
+        self.whisper_model_id = whisper_model_id
+        if not isinstance(whisper_pause_ms, int) or not 0 <= whisper_pause_ms <= 3000:
+            raise ValueError("Whisper pause must be between 0 and 3000 milliseconds.")
+        self.whisper_pause_ms = whisper_pause_ms
 
-    def synthesize(self, text):
+    def synthesize(self, text, *, cancelled=None):
+        phrases = whisper_phrases(text) if self.whisper else [text]
+        if not phrases or not text.strip():
+            raise VoiceError("There is no text to speak.")
+        paths = []
+        for phrase in phrases:
+            if cancelled is not None and cancelled.is_set():
+                raise VoiceError("Voice generation cancelled.")
+            paths.append(self._synthesize_phrase(phrase))
+        if cancelled is not None and cancelled.is_set():
+            raise VoiceError("Voice generation cancelled.")
+        # Retain the original phrase files. Derive new playback audio locally so
+        # an audio fix also repairs existing caches without another paid request.
+        digest = hashlib.sha256(json.dumps([
+            PLAYBACK_VERSION, [p.name for p in paths], self.whisper,
+            self.whisper_pause_ms if self.whisper else 0,
+        ]).encode()).hexdigest()
+        path = self.cache_dir / "playback" / f"{digest}.wav"
+        if self._valid_cached_audio(path):
+            return path
+        silence = b"\x00\x00" * (24000 * self.whisper_pause_ms // 1000)
+        frames = []
+        for index, clip in enumerate(paths):
+            if cancelled is not None and cancelled.is_set():
+                raise VoiceError("Voice generation cancelled.")
+            with wave.open(str(clip), "rb") as wav:
+                if index:
+                    frames.append(silence)
+                frames.append(prepare_playback_pcm(
+                    wav.readframes(wav.getnframes()), reduce_rumble=self.whisper,
+                ))
+        if cancelled is not None and cancelled.is_set():
+            raise VoiceError("Voice generation cancelled.")
+        self._write_wav(path, b"".join(frames))
+        return path
+
+    @staticmethod
+    def _valid_cached_audio(path):
+        try:
+            with wave.open(str(path), "rb") as wav:
+                return (wav.getnframes() > 0 and wav.getframerate() == 24000
+                        and wav.getnchannels() == 1 and wav.getsampwidth() == 2)
+        except (wave.Error, EOFError, OSError):
+            return False
+
+    @staticmethod
+    def _write_wav(path, pcm):
+        wav_bytes = io.BytesIO()
+        with wave.open(wav_bytes, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(24000)
+            wav.writeframes(pcm)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_bytes(wav_bytes.getvalue())
+        temporary.replace(path)
+
+    def _synthesize_phrase(self, text):
+        # Whisper uses a tag-capable model, even when the ordinary voice is v2.
+        voice_id, whisper = self.voice_id, self.whisper
+        model = self.whisper_model_id if whisper else self.model_id
+        settings = {"stability": 0.5 if model == "eleven_v3" else 0.45, "similarity_boost": 0.75}
+        if whisper and model == "eleven_v3":
+            settings["speed"] = 0.85
         payload = {
-            "text": text,
-            "model_id": self.model_id,
-            "voice_settings": {"stability": 0.45, "similarity_boost": 0.75},
+            "text": "[whispering] " + text if whisper else text,
+            "model_id": model,
+            "voice_settings": settings,
         }
         digest = hashlib.sha256(json.dumps(
-            [self.voice_id, payload, "pcm_24000"], sort_keys=True
+            [voice_id, payload, "pcm_24000"], sort_keys=True
         ).encode()).hexdigest()
         path = self.cache_dir / f"{digest}.wav"
-        if path.exists():
-            try:
-                with wave.open(str(path), "rb") as wav:
-                    if wav.getnframes() > 0 and wav.getframerate() == 24000:
-                        return path
-            except (wave.Error, EOFError, OSError):
-                pass
+        if self._valid_cached_audio(path):
+            return path
         if not self.api_key or self.api_key == "your_api_key_here":
             raise VoiceError("Add your ElevenLabs key to .env, restart, or select Silent rehearsal.")
-        voice = urllib.parse.quote(self.voice_id, safe="")
+        voice = urllib.parse.quote(voice_id, safe="")
         request = urllib.request.Request(
             f"https://api.elevenlabs.io/v1/text-to-speech/{voice}?output_format=pcm_24000",
             data=json.dumps(payload).encode(),
@@ -74,16 +152,7 @@ class ElevenVoice:
             raise VoiceError("Could not reach ElevenLabs. Check the internet or use Silent rehearsal.") from None
         if not pcm or len(pcm) % 2 or len(pcm) > 12_000_000:
             raise VoiceError("ElevenLabs returned invalid or oversized audio.")
-        wav_bytes = io.BytesIO()
-        with wave.open(wav_bytes, "wb") as wav:
-            wav.setnchannels(1)
-            wav.setsampwidth(2)
-            wav.setframerate(24000)
-            wav.writeframes(pcm)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(".tmp")
-        temporary.write_bytes(wav_bytes.getvalue())
-        temporary.replace(path)
+        self._write_wav(path, pcm)
         return path
 
 
@@ -113,12 +182,15 @@ class VoiceWorker:
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
-    def speak(self, text):
+    def speak(self, text, *, voice_id=None):
         with self.lock:
             if self.busy:
                 return False
             self.busy = True
-            self.jobs.put((self.generation, self.cancelled, text))
+            backend = copy.copy(self.backend)
+            if voice_id is not None:
+                backend.voice_id = voice_id
+            self.jobs.put((self.generation, self.cancelled, text, backend))
             return True
 
     def stop(self):
@@ -138,17 +210,18 @@ class VoiceWorker:
             job = self.jobs.get()
             if job is None:
                 return
-            generation, cancelled, text = job
+            generation, cancelled, text, backend = job
             if cancelled.is_set():
                 continue
             error = None
             try:
                 self.events.put((generation, "status", "Preparing voice…"))
-                path = self.backend.synthesize(text)
+                path = backend.synthesize(text, cancelled=cancelled)
                 with self.lock:
                     if cancelled.is_set():
                         continue
                     duration = self.player.play(path)
+                    self.events.put((generation, "playing", "Voice playing · measuring this round"))
                     self.events.put((generation, "status", "Speaking through Windows audio output…"))
                 cancelled.wait(duration + 0.1)
             except VoiceError as exc:

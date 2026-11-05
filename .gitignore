@@ -7,4 +7,8 @@ __pycache__/
 .cache/
 output/
 .pytest_cache/
+.build/
 
+
+# Local Feather Wi-Fi credentials
+arduino/feather_gsr_wifi/wifi_secrets.h

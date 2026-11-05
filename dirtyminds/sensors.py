@@ -99,3 +99,66 @@ def list_ports():
     except ImportError:
         return []
 
+
+
+class WirelessInput:
+    """Read the Feather's newline-delimited TCP stream on the local network."""
+    def __init__(self, host, maximum=1023, port=8765):
+        import socket
+        host = host.strip()
+        if not host:
+            raise ValueError("Enter the Feather's IP address.")
+        self.maximum = maximum
+        self.samples = queue.Queue(maxsize=100)
+        self.error = None
+        self.stop_event = threading.Event()
+        try:
+            self.connection = socket.create_connection((host, port), timeout=2)
+            self.connection.settimeout(.2)
+        except OSError:
+            raise ValueError("Cannot reach Feather. Check its IP and Wi-Fi network.") from None
+        self.thread = threading.Thread(target=self._read, daemon=True)
+        self.thread.start()
+
+    def _read(self):
+        import socket
+        pending = bytearray()
+        discarding = False
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    data = self.connection.recv(256)
+                except socket.timeout:
+                    continue
+                if not data:
+                    raise ConnectionError()
+                for byte in data:
+                    if byte == 10:
+                        value = None if discarding else parse_reading(bytes(pending), self.maximum)
+                        pending.clear()
+                        discarding = False
+                        if value is not None:
+                            try:
+                                self.samples.put_nowait((time.monotonic(), value))
+                            except queue.Full:
+                                try:
+                                    self.samples.get_nowait()
+                                except queue.Empty:
+                                    pass
+                                self.samples.put_nowait((time.monotonic(), value))
+                    elif not discarding:
+                        pending.append(byte)
+                        if len(pending) > 64:
+                            pending.clear()
+                            discarding = True
+        except OSError:
+            if not self.stop_event.is_set():
+                self.error = "Feather Wi-Fi connection lost. Start a new session after reconnecting."
+        finally:
+            self.connection.close()
+
+    poll = SerialInput.poll
+
+    def close(self):
+        self.stop_event.set()
+        self.thread.join(timeout=.5)

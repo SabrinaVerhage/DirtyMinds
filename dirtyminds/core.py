@@ -1,115 +1,191 @@
-"""Pure session logic: no UI, network, or hardware required."""
-from dataclasses import dataclass
+"""Four temptations, independent signal scores, and a bounded brine recipe."""
+from dataclasses import asdict, dataclass
 from enum import Enum
 import math
 import statistics
 
 
+@dataclass(frozen=True)
+class Ingredient:
+    key: str
+    name: str
+    pump: int
+    voice_id: str
+    voice_name: str
+    pitch: str
+
+
+INGREDIENTS = (
+    Ingredient("onion", "Silver onion", 1, "1ykC5GeLM4dP82qkyo91", "Nora",
+        "Small. Pale. Perfectly pickled. A silver pearl with a sweet little secret. "
+        "Let my onion brine curl through your cold martini. Clean at first. "
+        "Then a sharp little kiss that stays with you."),
+    Ingredient("olive", "Classic olive", 2, "EXAVITQu4vr4xnSDxMaL", "Sarah",
+        "I am the classic temptation. Green olives, velvet salt, and a slow, savoury finish. "
+        "Your martini looks so innocent in that glass. Let me make it beautifully dirty. "
+        "Some classics know exactly what they are doing."),
+    Ingredient("jalapeno", "Jalapeño", 3, "A6TsrDqI2qlO9AWAfZHY", "Shanni",
+        "Cool glass. Hot intentions. A little jalapeño brine brings heat to the moment. "
+        "First a bright green spark. Then warmth that lingers after the sip. "
+        "How much trouble would you like in your martini?"),
+    Ingredient("pickle", "Dutch augurk", 4, "AIFcvMreCoOxyPTbUrwe", "Marleen",
+        "I'm the Dutch one. A proper little augurk. Cool, crisp, and just sharp enough to keep you interested. "
+        "Let my pickle brine slip into your martini. You call it naughty. I call it lekker."),
+)
+
+
 class Stage(str, Enum):
     READY = "Ready"
-    WELCOME = "Welcome"
-    CALIBRATE = "Finding your baseline"
-    EXPLORE = "A little imagination"
-    RESPOND = "Reading the ripples"
-    SETTLE = "Mixing your recipe"
-    COMPLETE = "Your martini is ready"
+    WELCOME = "A dirty little introduction"
+    BASELINE_PROMPT = "Your baseline dirty"
+    CALIBRATE = "Finding your baseline · keep still"
+    ROUND_1 = "1 / 4 · Silver onion"
+    REST_1 = "A quiet breath"
+    ROUND_2 = "2 / 4 · Classic olive"
+    REST_2 = "A little pause"
+    ROUND_3 = "3 / 4 · Jalapeño"
+    REST_3 = "Let the heat settle"
+    ROUND_4 = "4 / 4 · Dutch augurk"
+    REVEAL = "Your dirty mind, your blend"
+    DISPENSE = "Making it dirty"
+    FAREWELL = "You deserve a dirty drink"
+    COMPLETE = "Your session is complete"
     STOPPED = "Stopped"
 
 
-SEQUENCE = (Stage.WELCOME, Stage.CALIBRATE, Stage.EXPLORE, Stage.RESPOND, Stage.SETTLE)
-DURATIONS = (7, 8, 14, 10, 3)
+SEQUENCE = tuple(s for s in Stage if s not in (Stage.READY, Stage.COMPLETE, Stage.STOPPED))
+ROUND_STAGES = (Stage.ROUND_1, Stage.ROUND_2, Stage.ROUND_3, Stage.ROUND_4)
+REST_STAGES = (Stage.REST_1, Stage.REST_2, Stage.REST_3)
 LINES = {
-    Stage.WELCOME: "Welcome to Dirty Minds. Make yourself comfortable. You can stop whenever you like.",
-    Stage.CALIBRATE: "Rest your fingers on the contacts. Be still for a moment. Let's find where we begin.",
-    Stage.EXPLORE: "Close your eyes, if you like. Imagine a secret you would only tell over a very good martini. Take your time.",
-    Stage.SETTLE: "I think I've found your secret ingredient. A little patience. A little salt.",
+    Stage.WELCOME: "I have a feeling you have a dirty mind. Sit down. Get comfortable. "
+        "Four little temptations are waiting for you. Let's see which one makes a ripple. "
+        "You can stop whenever you like.",
+    Stage.BASELINE_PROMPT: "First, I need to sense your baseline dirty. Rest your fingers on the contacts. "
+        "Stay still for a moment. Just you, me, and a little anticipation.",
+    Stage.REVEAL: "Thank you for letting us read your dirty mind. Four temptations. Your own little secret. "
+        "We've created your personalised blend. Now, let's make it dirty.",
+    Stage.FAREWELL: "Thank you for sharing your dirty mind. You deserve a dirty drink. "
+        "Take your secret with you. Leave the glass with us.",
+    **{stage: ingredient.pitch for stage, ingredient in zip(ROUND_STAGES, INGREDIENTS)},
 }
-RESPONSE_LINES = (
-    "A quiet ripple. Some secrets prefer to stay close. Let's keep this one subtle.",
-    "Something shifted. Let's give that thought a little more salt.",
-    "Quite a ripple. This martini is asking for extra olives.",
-)
-FINISH_LINES = (
-    "Your martini is ready. A little dirty, with a secret on the side.",
-    "Your martini is ready. A classic dirty martini. Keep the thought that inspired it.",
-    "Your martini is ready. Extra dirty. Some secrets come with olives.",
-)
 TEST_LINE = "Welcome to Dirty Minds. If you can hear me, we're ready to begin."
+AFTER_SPEECH = {stage: 6 if stage in ROUND_STAGES else 8 if stage == Stage.CALIBRATE
+                else 4 if stage in REST_STAGES else 1 for stage in SEQUENCE}
 
 
-def clamp(value: float) -> float:
+def clamp(value):
     if not math.isfinite(value):
         raise ValueError("Signal must be a finite number.")
     return min(1.0, max(0.0, value))
 
 
-def band(score: float) -> int:
-    return 0 if score < 0.33 else 1 if score < 0.67 else 2
+@dataclass(frozen=True)
+class RoundResult:
+    ingredient: str
+    score: float
+    peak: float
+    samples: int
 
 
 @dataclass(frozen=True)
 class Recipe:
     name: str
-    score: float
-    gin_ml: int
-    vermouth_ml: int
-    brine_ml: int
-    olives: int
+    amounts: tuple
+    reason: str
+    gin_ml: int = 50
+    vermouth_ml: int = 10
 
-    def display(self) -> str:
-        return (
-            f"{self.name}\n\n"
-            f"{self.gin_ml} ml gin (or vodka)\n"
-            f"{self.vermouth_ml} ml dry vermouth\n"
-            f"{self.brine_ml} ml olive brine\n"
-            f"{self.olives} olives\n\n"
-            "Stir liquids with ice until cold.\n"
-            "Strain into a chilled glass. Garnish with olives.\n"
-            f"Signal change: {self.score:.0%} · playful recipe mapping"
-        )
+    @property
+    def brine_ml(self):
+        return sum(self.amounts)
+
+    def display(self):
+        brines = ", ".join(f"{ml:g} ml {item.name.lower()} brine"
+                           for item, ml in zip(INGREDIENTS, self.amounts) if ml)
+        return (f"{self.name}\n50 ml gin (or vodka) + 10 ml dry vermouth\n{brines}\n"
+                "Stir with ice, strain cold, garnish to match.\n" + self.reason)
 
 
-def make_recipe(score: float) -> Recipe:
-    score = clamp(score)
-    # Only brine/garnish change; signal never increases the alcohol amount.
-    brine = 5 + int(score * 4 + 0.5) * 5
-    names = ("A little dirty", "Dirty Minds martini", "Extra dirty")
-    return Recipe(names[band(score)], score, 50, 10, brine, 1 + band(score))
+def make_recipe(scores):
+    if len(scores) != 4:
+        raise ValueError("A recipe needs all four round scores.")
+    scores = [clamp(value) for value in scores]
+    rank = sorted(range(4), key=lambda i: (-scores[i], (1, 0, 2, 3)[i]))
+    first, second = rank[:2]
+    amounts = [0.0] * 4
+    if scores[first] < 0.10:
+        amounts[1] = 15.0
+        name, reason = "The quiet classic", "Small responses: classic olive is the fallback."
+    elif scores[second] + 1e-12 >= scores[first] * 0.75:
+        amounts[first] = round(15 * scores[first] / (scores[first] + scores[second]), 1)
+        amounts[second] = round(15 - amounts[first], 1)
+        name = f"{INGREDIENTS[first].name} & {INGREDIENTS[second].name.lower()} affair"
+        reason = "A close second joins the strongest response in a 15 ml blend."
+    else:
+        amounts[first] = 15.0
+        name = f"A little {INGREDIENTS[first].name.lower()} trouble"
+        reason = "The strongest response chooses all 15 ml of brine."
+    return Recipe(name, tuple(amounts), reason)
 
 
 class Session:
-    def __init__(self, span: float = 200, time_scale: float = 1):
-        if not math.isfinite(span) or span <= 0 or time_scale <= 0:
+    def __init__(self, span=200, time_scale=1):
+        if not all(math.isfinite(x) and x > 0 for x in (span, time_scale)):
             raise ValueError("Signal span and time scale must be positive.")
-        self.span = span
-        self.time_scale = time_scale
-        self.stage = Stage.READY
-        self.entered = 0.0
-        self.smoothed = None
-        self.baseline = None
-        self.calibration = []
-        self.responses = []
+        self.span, self.time_scale = span, time_scale
+        self.stage, self.entered = Stage.READY, 0.0
+        self.smoothed = self.baseline = self.recipe = None
+        self.calibration, self.responses, self.results = [], [], []
         self.signal = 0.0
-        self.recipe = None
+        self.spoken = self.voice_pending = self.playback_has_started = False
+        self.ready_at = None
+        self.delivery_complete = False
 
     @property
     def active(self):
         return self.stage in SEQUENCE
 
     @property
-    def score(self):
-        return statistics.fmean(self.responses) if self.responses else 0.0
+    def round_index(self):
+        return ROUND_STAGES.index(self.stage) if self.stage in ROUND_STAGES else None
 
-    def start(self, now: float):
+    @property
+    def collecting(self):
+        return self.round_index is not None and self.playback_has_started
+
+    @property
+    def needs_sensor(self):
+        return self.active and SEQUENCE.index(self.stage) <= SEQUENCE.index(Stage.ROUND_4)
+
+    def _enter(self, stage, now):
+        self.stage, self.entered = stage, now
+        self.voice_pending = self.spoken and bool(LINES.get(stage))
+        self.playback_has_started = not self.voice_pending
+        self.responses = []
+        duration = AFTER_SPEECH.get(stage, 0)
+        if not self.spoken and stage in LINES:
+            duration += 14 if stage in ROUND_STAGES else 4
+        self.ready_at = None if self.voice_pending or stage == Stage.DISPENSE else now + duration * self.time_scale
+
+    def start(self, now, *, spoken=False):
         self.__init__(self.span, self.time_scale)
-        self.stage = Stage.WELCOME
-        self.entered = now
+        self.spoken = spoken
+        self._enter(Stage.WELCOME, now)
+
+    def playback_started(self):
+        if self.voice_pending:
+            self.playback_has_started = True
+
+    def voice_finished(self, now):
+        if self.voice_pending:
+            self.voice_pending = False
+            self.ready_at = now + AFTER_SPEECH[self.stage] * self.time_scale
 
     def stop(self):
         self.stage = Stage.STOPPED
-        self.recipe = None
+        self.voice_pending = False
 
-    def sample(self, raw: float):
+    def sample(self, raw):
         if not math.isfinite(raw):
             return
         self.smoothed = raw if self.smoothed is None else 0.22 * raw + 0.78 * self.smoothed
@@ -117,42 +193,52 @@ class Session:
             self.calibration.append(self.smoothed)
         if self.baseline is not None:
             self.signal = clamp(abs(self.smoothed - self.baseline) / self.span)
-            if self.stage in (Stage.EXPLORE, Stage.RESPOND):
+            if self.collecting:
                 self.responses.append(self.signal)
 
-    def tick(self, now: float, voice_busy: bool = False):
-        if not self.active:
+    def tick(self, now, voice_busy=False):
+        if not self.active or self.stage == Stage.DISPENSE or self.voice_pending or voice_busy:
             return False
-        index = SEQUENCE.index(self.stage)
-        if voice_busy or now - self.entered < DURATIONS[index] * self.time_scale:
+        if self.ready_at is None or now < self.ready_at:
             return False
         if self.stage == Stage.CALIBRATE:
             if len(self.calibration) < 10:
-                raise ValueError("Not enough sensor readings to calibrate. Check the input and start again.")
+                raise ValueError("Not enough sensor readings for a baseline. Check the input and start again.")
             self.baseline = statistics.median(self.calibration)
-        if index == len(SEQUENCE) - 1:
+        index = self.round_index
+        if index is not None:
             if len(self.responses) < 10:
-                raise ValueError("Not enough sensor readings for a recipe. Check the input and start again.")
-            self.recipe = make_recipe(self.score)
-            self.stage = Stage.COMPLETE
-        else:
-            self.stage = SEQUENCE[index + 1]
-        self.entered = now
+                raise ValueError(f"Not enough sensor readings for round {index + 1}. Start a fresh session.")
+            self.results.append(RoundResult(INGREDIENTS[index].key, statistics.fmean(self.responses),
+                                            max(self.responses), len(self.responses)))
+            if index == 3:
+                self.recipe = make_recipe([result.score for result in self.results])
+        position = SEQUENCE.index(self.stage) + 1
+        self._enter(SEQUENCE[position] if position < len(SEQUENCE) else Stage.COMPLETE, now)
         return True
 
-    def progress(self, now: float):
+    def finish_delivery(self, now):
+        if self.stage != Stage.DISPENSE:
+            return False
+        self.delivery_complete = True
+        self._enter(Stage.FAREWELL, now)
+        return True
+
+    def progress(self, now):
         if self.stage == Stage.COMPLETE:
             return 100.0
         if not self.active:
             return 0.0
-        index = SEQUENCE.index(self.stage)
-        elapsed = min(DURATIONS[index], max(0, now - self.entered) / self.time_scale)
-        return 100 * (sum(DURATIONS[:index]) + elapsed) / sum(DURATIONS)
+        fraction = 0 if self.ready_at is None else min(1, max(0, (now - self.entered) / max(.001, self.ready_at - self.entered)))
+        return 100 * (SEQUENCE.index(self.stage) + fraction) / len(SEQUENCE)
 
     def line(self):
-        if self.stage == Stage.RESPOND:
-            return RESPONSE_LINES[band(self.score)]
-        if self.stage == Stage.COMPLETE:
-            return FINISH_LINES[band(self.score)]
-        return LINES.get(self.stage, "")
+        return LINES.get(self.stage, "Keep still. Let the last little ripple settle." if self.stage in REST_STAGES
+                         else "Stay still while we find your baseline." if self.stage == Stage.CALIBRATE else "")
 
+    def record(self):
+        return {"stage": self.stage.value, "baseline": self.baseline, "gsr_span": self.span,
+                "rounds": [asdict(result) for result in self.results],
+                "recipe": asdict(self.recipe) if self.recipe else None,
+                "delivery_complete": self.delivery_complete,
+                "measurement": "Artistic signal mapping; not a measure of thoughts or desire."}

@@ -3,46 +3,71 @@ import queue
 import threading
 import unittest
 
-from dirtyminds.core import Session, Stage, SEQUENCE, DURATIONS, make_recipe
+from dirtyminds.core import Session, Stage, SEQUENCE, ROUND_STAGES, make_recipe
 from dirtyminds.sensors import parse_reading, Simulator, SerialInput
 
 
 class SessionTests(unittest.TestCase):
     def test_complete_session_uses_baseline_and_yields_recipe(self):
         session = Session(span=200)
-        now = 0
-        session.start(now)
-        for stage, duration in zip(SEQUENCE, DURATIONS):
+        session.start(0)
+        for stage in SEQUENCE:
             self.assertEqual(session.stage, stage)
-            for _ in range(30):
-                session.sample(400 if stage in (Stage.WELCOME, Stage.CALIBRATE) else 600)
-            now += duration
-            self.assertTrue(session.tick(now))
+            if stage == Stage.DISPENSE:
+                self.assertFalse(session.tick(100000))
+                self.assertTrue(session.finish_delivery(1000))
+                continue
+            for _ in range(100):
+                session.sample(600 if stage == Stage.ROUND_3 else 400)
+            self.assertTrue(session.tick(session.ready_at))
         self.assertEqual(session.stage, Stage.COMPLETE)
         self.assertEqual(session.baseline, 400)
-        self.assertGreater(session.score, 0.8)
-        self.assertEqual(session.recipe.brine_ml, 25)
-        self.assertEqual(session.progress(now), 100)
+        self.assertEqual(len(session.results), 4)
+        self.assertGreater(session.results[2].score, .9)
+        self.assertLess(session.results[3].score, .01)
+        self.assertEqual(session.recipe.amounts, (0, 0, 15, 0))
+        self.assertTrue(session.delivery_complete)
+        self.assertEqual(session.progress(100000), 100)
 
     def test_voice_blocks_transition(self):
         session = Session()
-        session.start(0)
+        session.start(0, spoken=True)
         self.assertFalse(session.tick(100, voice_busy=True))
         self.assertEqual(session.stage, Stage.WELCOME)
-        self.assertTrue(session.tick(100))
+        self.assertFalse(session.tick(100))
+        session.playback_started()
+        self.assertFalse(session.tick(100))
+        session.voice_finished(100)
+        self.assertTrue(session.tick(101))
+
+    def test_generation_time_does_not_count_as_a_round_response(self):
+        session = Session(span=100)
+        session.start(0, spoken=True)
+        session.baseline = 400
+        session._enter(Stage.ROUND_1, 10)
+        for _ in range(100):
+            session.sample(400)
+        self.assertEqual(session.responses, [])
+        session.playback_started()
+        for _ in range(50):
+            session.sample(500)
+        session.voice_finished(200)
+        self.assertFalse(session.tick(205.9))
+        self.assertTrue(session.tick(206))
+        self.assertGreater(session.results[0].score, .9)
+        self.assertEqual(session.responses, [])
 
     def test_missing_calibration_cannot_make_recipe(self):
         session = Session()
-        session.start(0)
-        session.tick(7)
-        with self.assertRaisesRegex(ValueError, "calibrate"):
-            session.tick(15)
+        session._enter(Stage.CALIBRATE, 0)
+        with self.assertRaisesRegex(ValueError, "baseline"):
+            session.tick(8)
         self.assertIsNone(session.recipe)
 
     def test_missing_response_cannot_make_recipe(self):
         session = Session()
-        session.stage = Stage.SETTLE
-        with self.assertRaisesRegex(ValueError, "recipe"):
+        session._enter(Stage.ROUND_1, 0)
+        with self.assertRaisesRegex(ValueError, "round 1"):
             session.tick(50)
 
     def test_stop_and_restart_reset_measurements(self):
@@ -61,22 +86,37 @@ class SessionTests(unittest.TestCase):
 
     def test_inverted_signal_is_valid_absolute_change(self):
         session = Session(span=100)
-        session.stage = Stage.EXPLORE
+        session._enter(Stage.ROUND_1, 0)
         session.baseline = 500
         session.sample(400)
         self.assertEqual(session.signal, 1)
         session.sample(math.nan)
         self.assertEqual(len(session.responses), 1)
 
-    def test_recipe_is_bounded_monotonic_and_alcohol_fixed(self):
-        recipes = [make_recipe(x / 100) for x in range(-10, 111)]
-        self.assertEqual(sorted(r.brine_ml for r in recipes), [r.brine_ml for r in recipes])
+    def test_recipe_is_bounded_and_alcohol_fixed(self):
+        recipes = [make_recipe([x / 100, .2, .3, .4]) for x in range(-10, 111)]
         for recipe in recipes:
-            self.assertIn(recipe.brine_ml, (5, 10, 15, 20, 25))
+            self.assertAlmostEqual(recipe.brine_ml, 15)
             self.assertEqual((recipe.gin_ml, recipe.vermouth_ml), (50, 10))
-            self.assertIn(recipe.olives, (1, 2, 3))
+            self.assertLessEqual(sum(x > 0 for x in recipe.amounts), 2)
         with self.assertRaises(ValueError):
-            make_recipe(math.nan)
+            make_recipe([math.nan, 0, 0, 0])
+
+    def test_blend_threshold_fallback_and_ties(self):
+        self.assertEqual(make_recipe([0, 0, 0, 0]).amounts, (0, 15, 0, 0))
+        self.assertEqual(make_recipe([.8, .1, .1, .1]).amounts, (15, 0, 0, 0))
+        self.assertEqual(make_recipe([.8, .8, .8, .8]).amounts, (7.5, 7.5, 0, 0))
+        self.assertEqual(make_recipe([.8, .6, .1, 0]).amounts, (8.6, 6.4, 0, 0))
+        self.assertEqual(make_recipe([.8, .59, .1, 0]).amounts, (15, 0, 0, 0))
+
+    def test_bad_settings_and_premature_delivery(self):
+        for value in (0, -1, math.nan, math.inf):
+            with self.assertRaises(ValueError):
+                Session(time_scale=value)
+        session = Session()
+        session.start(0)
+        self.assertFalse(session.finish_delivery(1))
+        self.assertFalse(session.delivery_complete)
 
 
 class SensorTests(unittest.TestCase):
