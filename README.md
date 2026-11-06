@@ -248,3 +248,14 @@ Python + Tkinter keeps USB, audio and the window in one small process. Node coul
 do this too, especially with an existing web UI, but a browser would add a local
 bridge/server and Electron adds packaging. For this two-day local prototype,
 Python avoids those extra moving parts. The audio player is currently Windows-only.
+
+## Uno pump test window
+
+After running `setup.cmd`, upload `arduino/uno_pump_controller/uno_pump_controller.ino`
+to the classic Uno R3. Close Arduino Serial Monitor, then open `start_pump_test.cmd`.
+Select the Uno COM port. Each pump button runs for three seconds; Test all runs
+pumps one at a time. Use water, verify each channel separately, and keep a motor
+power disconnect accessible. The 10k enable pull-downs and correct 5V regulator
+jumper configuration are required; see `arduino/uno_pump_test/README.md`.
+The STOP button requests a stop; the firmware has a heartbeat timeout if USB fails.
+The one-pump sketch is a separate test and is replaced when the main sketch uploads.
