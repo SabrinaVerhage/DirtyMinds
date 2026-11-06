@@ -12,25 +12,27 @@ class Ingredient:
     pump: int
     voice_id: str
     voice_name: str
+    character: str
     pitch: str
+
+    @property
+    def introduction(self):
+        return f"My name is {self.character}."
 
 
 INGREDIENTS = (
-    Ingredient("onion", "Silver onion", 1, "1ykC5GeLM4dP82qkyo91", "Nora",
-        "Small. Pale. Perfectly pickled. A silver pearl with a sweet little secret. "
-        "Let my onion brine curl through your cold martini. Clean at first. "
-        "Then a sharp little kiss that stays with you."),
-    Ingredient("olive", "Classic olive", 2, "EXAVITQu4vr4xnSDxMaL", "Sarah",
-        "I am the classic temptation. Green olives, velvet salt, and a slow, savoury finish. "
-        "Your martini looks so innocent in that glass. Let me make it beautifully dirty. "
-        "Some classics know exactly what they are doing."),
-    Ingredient("jalapeno", "Jalapeño", 3, "A6TsrDqI2qlO9AWAfZHY", "Shanni",
-        "Cool glass. Hot intentions. A little jalapeño brine brings heat to the moment. "
-        "First a bright green spark. Then warmth that lingers after the sip. "
-        "How much trouble would you like in your martini?"),
-    Ingredient("pickle", "Dutch augurk", 4, "AIFcvMreCoOxyPTbUrwe", "Marleen",
-        "I'm the Dutch one. A proper little augurk. Cool, crisp, and just sharp enough to keep you interested. "
-        "Let my pickle brine slip into your martini. You call it naughty. I call it lekker."),
+    Ingredient("onion", "Silver onion", 1, "1ykC5GeLM4dP82qkyo91", "Nora", "Pearl",
+        "A silver onion with layers. Take one sip and I'll tell you a secret. "
+        "Sweet at first, then a little sharp. I never said it was a nice secret."),
+    Ingredient("olive", "Classic olive", 2, "PB6BdkFkZLbI39GHdnbQ", "Natasha", "Olive Twist",
+        "Of course I want some more. More velvet salt, more ice, and a little less innocence. "
+        "Your martini wore white. How very optimistic."),
+    Ingredient("jalapeno", "Jalapeño", 3, "A6TsrDqI2qlO9AWAfZHY", "Shanni", "Pepper",
+        "Your glass is freezing. Lucky for you, I brought a spark. "
+        "First comes a crisp little bite. Then the kind of heat that stays for another sip."),
+    Ingredient("pickle", "Dutch augurk", 4, "1cxc5c3E9K6F1wlqOJGV", "Emily", "Dill With It",
+        "A proper Dutch augurk. Crisp, cool, and a terrible influence on an innocent martini. "
+        "You call it trouble. I call it lekker."),
 )
 
 
@@ -57,17 +59,21 @@ SEQUENCE = tuple(s for s in Stage if s not in (Stage.READY, Stage.COMPLETE, Stag
 ROUND_STAGES = (Stage.ROUND_1, Stage.ROUND_2, Stage.ROUND_3, Stage.ROUND_4)
 REST_STAGES = (Stage.REST_1, Stage.REST_2, Stage.REST_3)
 LINES = {
-    Stage.WELCOME: "I have a feeling you have a dirty mind. Sit down. Get comfortable. "
-        "Four little temptations are waiting for you. Let's see which one makes a ripple. "
+    Stage.WELCOME: "Hello, dirty mind. Four pickles walked into a bar. "
+        "One of them is about to get into your martini. "
+        "Close your eyes if you like. Let's see what kind of dirty you take yours. "
         "You can stop whenever you like.",
     Stage.BASELINE_PROMPT: "First, I need to sense your baseline dirty. Rest your fingers on the contacts. "
         "Stay still for a moment. Just you, me, and a little anticipation.",
-    Stage.REVEAL: "Thank you for letting us read your dirty mind. Four temptations. Your own little secret. "
-        "We've created your personalised blend. Now, let's make it dirty.",
+    Stage.REVEAL: "The votes are in. The brine has spoken. "
+        "Your very own dirty blend is ready. Let's make it.",
     Stage.FAREWELL: "Thank you for sharing your dirty mind. You deserve a dirty drink. "
         "Take your secret with you. Leave the glass with us.",
-    **{stage: ingredient.pitch for stage, ingredient in zip(ROUND_STAGES, INGREDIENTS)},
+    **{stage: f"{ingredient.introduction} {ingredient.pitch}" for stage, ingredient in zip(ROUND_STAGES, INGREDIENTS)},
 }
+VOICE_CUES = {Stage.WELCOME: "[exhales]", **{
+    stage: cue for stage, cue in zip(ROUND_STAGES, ("[exhales]", "[sighs]", "[exhales]", "[sighs]"))
+}}
 TEST_LINE = "Welcome to Dirty Minds. If you can hear me, we're ready to begin."
 AFTER_SPEECH = {stage: 6 if stage in ROUND_STAGES else 8 if stage == Stage.CALIBRATE
                 else 4 if stage in REST_STAGES else 1 for stage in SEQUENCE}
@@ -214,10 +220,15 @@ class Session:
             if index == 3:
                 self.recipe = make_recipe([result.score for result in self.results])
         position = SEQUENCE.index(self.stage) + 1
+        if self.stage == Stage.REVEAL and self.delivery_complete:
+            position += 1  # Delivery finished during the reveal, so go straight to farewell.
         self._enter(SEQUENCE[position] if position < len(SEQUENCE) else Stage.COMPLETE, now)
         return True
 
     def finish_delivery(self, now):
+        if self.stage == Stage.REVEAL:
+            self.delivery_complete = True
+            return False
         if self.stage != Stage.DISPENSE:
             return False
         self.delivery_complete = True

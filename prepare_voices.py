@@ -1,6 +1,6 @@
 """Cache the eight fixed voice lines before a live session; does not play audio."""
 from dirtyminds.app import ROOT, load_config
-from dirtyminds.core import INGREDIENTS, LINES, ROUND_STAGES, SEQUENCE
+from dirtyminds.core import LINES, ROUND_STAGES, SEQUENCE, VOICE_CUES
 from dirtyminds.voice import ElevenVoice, VoiceError
 
 
@@ -16,7 +16,7 @@ def main():
                 continue
             voice.voice_id = config['round_voices'][ROUND_STAGES.index(stage)] if stage in ROUND_STAGES else config['voice_id']
             print(f'Preparing: {stage.value}', flush=True)
-            voice.synthesize(LINES[stage])
+            voice.synthesize(LINES[stage], cue=VOICE_CUES.get(stage) if config['voice_effects'] else None)
             print('  Cached.', flush=True)
         print('Ready. This cast and script can now play from the local cache.')
     except (ValueError, VoiceError) as exc:

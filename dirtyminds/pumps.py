@@ -81,8 +81,9 @@ class PumpClient:
             if self.clock() >= next_probe:
                 self.send("HELLO")
                 next_probe = self.clock() + 0.5
-            if self.read_line().startswith("DIRTYMINDS_PUMPS 1 "):
-                return
+            line = self.read_line()
+            if line.startswith("DIRTYMINDS_PUMPS 1 "):
+                return line
         raise PumpError("No Dirty Minds pump firmware found. Check COM port, upload, and baud rate.")
 
     def stop(self):

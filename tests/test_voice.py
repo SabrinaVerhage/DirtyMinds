@@ -75,6 +75,17 @@ class VoiceTests(unittest.TestCase):
         self.assertNotIn("test-secret", str(caught.exception))
         self.assertIn("rejected the key", str(caught.exception))
 
+    def test_v4_places_one_reaction_beside_whispered_dialogue(self):
+        self.voice.whisper = True
+        self.voice.whisper_model_id = "eleven_v4"
+        with patch("dirtyminds.voice.urllib.request.build_opener") as opener:
+            send = opener.return_value.open
+            send.side_effect = [FakeResponse(b"\0\0" * 100) for _ in range(2)]
+            self.voice.synthesize("My name is Pearl. I have a secret.", cue="[sighs]")
+        requests = [json.loads(call.args[0].data) for call in send.call_args_list]
+        self.assertEqual([item["text"] for item in requests],
+                         ["[whispering] My name is Pearl.", "[whispering] [sighs] I have a secret."])
+
     def test_whisper_restarts_per_phrase_and_adds_exact_silence(self):
         self.voice.whisper = True
         first = b"\x01\x00" * 2400

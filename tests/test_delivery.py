@@ -6,13 +6,67 @@ import unittest
 from unittest.mock import patch
 
 from dirtyminds.core import Session, RoundResult, make_recipe
-from dirtyminds.delivery import DeliveryWorker, delivery_durations, LEDS, SCREEN, MOTORS
+from dirtyminds.delivery import DeliveryWorker, delivery_durations, water_test_ms, LEDS, SCREEN, MOTORS, WATER
 from dirtyminds.pumps import PumpCancelled, PumpClient, PumpError
 from dirtyminds.records import new_record_path, save_record
 from test_lights import FakeConnection
 
 
 class DeliveryTests(unittest.TestCase):
+    def test_water_rehearsal_uses_timers_only_for_selected_channels(self):
+        recipe = make_recipe([.8, .6, 0, 0])
+        self.assertEqual(delivery_durations(recipe, WATER, water_ms=(2300, 500, 100, 300)), [2300, 500, 0, 0])
+        self.assertEqual(water_test_ms("2.3"), 2300)
+        for value in ("0", "10.1", "nan", "abc"):
+            with self.assertRaises(ValueError):
+                water_test_ms(value)
+
+    def test_uno_waits_for_reveal_cue_and_stop_while_waiting_never_arms(self):
+        class MotorConnection(FakeConnection):
+            def write(self, data):
+                super().write(data)
+                if data == b"ARM\n":
+                    self.replies.append(b"OK ARM\n")
+                elif data.startswith(b"SEQ "):
+                    self.replies.extend([b"OK START\n", b"DONE\n"])
+
+        for cue in (False, True):
+            with self.subTest(cue=cue), patch("serial.Serial") as serial:
+                connection = serial.return_value = MotorConnection()
+                worker = DeliveryWorker()
+                try:
+                    self.assertTrue(worker.start_delivery("COM7", [1000, 0, 0, 0], WATER, on_cue=True))
+                    events = [worker.events.get(timeout=1) for _ in range(3)]
+                    self.assertEqual(events[-1][0], "ready")
+                    self.assertEqual(connection.commands, ["HELLO"])
+                    if cue:
+                        worker.cue_motors()
+                    else:
+                        worker.stop()
+                    worker.thread.join(2)
+                    self.assertFalse(worker.busy)
+                    self.assertEqual("ARM" in connection.commands, cue)
+                    self.assertEqual("SEQ 1000 0 0 0" in connection.commands, cue)
+                    self.assertEqual(list(worker.events.queue)[-1][0], "done" if cue else "cancelled")
+                finally:
+                    worker.close()
+
+    def test_uno_status_only_identifies_and_queries(self):
+        class StatusConnection(FakeConnection):
+            def write(self, data):
+                super().write(data)
+                if data == b"STATUS\n":
+                    self.replies.append(b"STATUS armed=0 running=0\n")
+
+        connection = StatusConnection()
+        worker = DeliveryWorker()
+        with patch("serial.Serial", return_value=connection):
+            self.assertTrue(worker.check_uno("COM7"))
+            worker.thread.join(2)
+        self.assertEqual(connection.commands, ["HELLO", "STATUS"])
+        self.assertIn(("reply", "STATUS armed=0 running=0"), list(worker.events.queue))
+        self.assertTrue(connection.closed)
+
     def test_recipe_rows_and_real_calibration(self):
         recipe = make_recipe([.8, .6, 0, 0])
         self.assertEqual(delivery_durations(recipe, LEDS), [3440, 2560, 0, 0])

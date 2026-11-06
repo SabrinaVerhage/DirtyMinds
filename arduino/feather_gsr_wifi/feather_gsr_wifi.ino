@@ -47,7 +47,7 @@ void loop() {
     pixels.clear();
     for (int i = 0; i < count; ++i) pixels.setPixelColor(i, pixels.Color(80, 8, 28));
     pixels.show();
-    if (client && client.connected() && client.availableForWrite() >= 16) {
+    if (client && client.connected()) {
       client.print("GSR:"); client.println(value);
     }
   }

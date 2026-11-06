@@ -51,10 +51,15 @@ class ElevenVoice:
             raise ValueError("Whisper pause must be between 0 and 3000 milliseconds.")
         self.whisper_pause_ms = whisper_pause_ms
 
-    def synthesize(self, text, *, cancelled=None):
+    def synthesize(self, text, *, cancelled=None, cue=None):
         phrases = whisper_phrases(text) if self.whisper else [text]
         if not phrases or not text.strip():
             raise VoiceError("There is no text to speak.")
+        model = self.whisper_model_id if self.whisper else self.model_id
+        if cue and model in ("eleven_v3", "eleven_v4"):
+            # Place the reaction beside dialogue so it doesn't need a separate clip.
+            index = min(1, len(phrases) - 1)
+            phrases[index] = f"{cue} {phrases[index]}"
         paths = []
         for phrase in phrases:
             if cancelled is not None and cancelled.is_set():
@@ -113,7 +118,7 @@ class ElevenVoice:
         # Whisper uses a tag-capable model, even when the ordinary voice is v2.
         voice_id, whisper = self.voice_id, self.whisper
         model = self.whisper_model_id if whisper else self.model_id
-        settings = {"stability": 0.5 if model == "eleven_v3" else 0.45, "similarity_boost": 0.75}
+        settings = {"stability": 0.5 if model in ("eleven_v3", "eleven_v4") else 0.45, "similarity_boost": 0.75}
         if whisper and model == "eleven_v3":
             settings["speed"] = 0.85
         payload = {
@@ -182,7 +187,7 @@ class VoiceWorker:
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
-    def speak(self, text, *, voice_id=None):
+    def speak(self, text, *, voice_id=None, cue=None):
         with self.lock:
             if self.busy:
                 return False
@@ -190,7 +195,7 @@ class VoiceWorker:
             backend = copy.copy(self.backend)
             if voice_id is not None:
                 backend.voice_id = voice_id
-            self.jobs.put((self.generation, self.cancelled, text, backend))
+            self.jobs.put((self.generation, self.cancelled, text, backend, cue))
             return True
 
     def stop(self):
@@ -210,13 +215,14 @@ class VoiceWorker:
             job = self.jobs.get()
             if job is None:
                 return
-            generation, cancelled, text, backend = job
+            generation, cancelled, text, backend, cue = job
             if cancelled.is_set():
                 continue
             error = None
             try:
                 self.events.put((generation, "status", "Preparing voice…"))
-                path = backend.synthesize(text, cancelled=cancelled)
+                options = {"cue": cue} if cue else {}
+                path = backend.synthesize(text, cancelled=cancelled, **options)
                 with self.lock:
                     if cancelled.is_set():
                         continue

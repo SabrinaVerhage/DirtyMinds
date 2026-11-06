@@ -9,20 +9,26 @@ import tkinter as tk
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from dirtyminds.app import App
-from dirtyminds.core import INGREDIENTS, LINES, Session, Stage
-from dirtyminds.delivery import LEDS
+from dirtyminds.app import App, IDLE_CELL
+from dirtyminds.core import INGREDIENTS, LINES, ROUND_STAGES, Stage, make_recipe
+from dirtyminds.delivery import LEDS, WATER
 
 
 class FakeDelivery:
     def __init__(self):
         self.events, self.calls = queue.Queue(), []
         self.busy = False
+        self.cues = 0
+        self.on_cue = False
 
     def start_delivery(self, port, durations, mode, **kwargs):
         self.busy = True
         self.calls.append((port, durations, mode))
+        self.on_cue = kwargs.get("on_cue", False)
         return True
+
+    def cue_motors(self):
+        self.cues += 1
 
     def stop(self):
         self.busy = False
@@ -36,7 +42,7 @@ class FakeVoice:
         self.events, self.calls = queue.Queue(), []
         self.generation, self.busy = 0, False
 
-    def speak(self, text, *, voice_id=None):
+    def speak(self, text, *, voice_id=None, cue=None):
         self.busy = True
         self.calls.append((text, voice_id))
         self.events.put((self.generation, 'playing', 'playing'))
@@ -59,12 +65,38 @@ with tempfile.TemporaryDirectory() as directory, patch('dirtyminds.app.ROOT', Pa
         app.delivery = FakeDelivery()
         app.pump_port.set('COM7')
         # Exercise layout at the advertised minimum, including a long pitch and recipe.
-        root.geometry('960x780')
-        app.line_text.set(INGREDIENTS[3].pitch)
+        root.geometry('960x750')
+        app.line_text.set(LINES[Stage.WELCOME])
         root.update()
         assert app.status_label.winfo_rooty() + app.status_label.winfo_height() < root.winfo_rooty() + root.winfo_height()
         assert app.start_button.winfo_rooty() + app.start_button.winfo_height() < app.status_label.winfo_rooty()
-        assert app.lights_button.winfo_rooty() + app.lights_button.winfo_height() < app.status_label.winfo_rooty()
+        assert app.hardware_button.winfo_rooty() + app.hardware_button.winfo_height() < app.status_label.winfo_rooty()
+        assert app.copy_button.winfo_rooty() + app.copy_button.winfo_height() < app.status_label.winfo_rooty()
+        app.open_hardware()
+        hardware = app.hardware_window
+        root.update()
+        assert hardware.pulses[-1].instate(["disabled"])
+        hardware.pulse(4)
+        assert not app.delivery.calls
+        hardware.armed.set(True)
+        hardware.update()
+        app.water_times[-1].set('1.5')
+        hardware.pulses[-1].invoke()
+        assert app.delivery.calls[-1] == ('COM7', [0, 0, 0, 1500], WATER)
+        app.stop()
+        assert not hardware.armed.get() and not app.delivery.busy
+        app.feather_host.set('127.0.0.1')
+        with patch('dirtyminds.hardware_ui.WirelessInput') as sensor:
+            sensor.return_value.error = None
+            sensor.return_value.poll.return_value = [(time.monotonic(), 512)]
+            hardware.toggle_feather()
+            hardware.poll(time.monotonic())
+            assert 'raw 512' in hardware.feather_status.get()
+            assert app.start_button['state'] == 'disabled'
+            hardware.toggle_feather()
+            sensor.return_value.close.assert_called_once()
+        assert 'receiving valid GSR samples' in hardware.log.get('1.0', 'end')
+        hardware.close()
         for spoken in (False, True):
             app.silent.set(not spoken)
             app.start()
@@ -94,7 +126,7 @@ with tempfile.TemporaryDirectory() as directory, patch('dirtyminds.app.ROOT', Pa
                         assert app.voice.calls[-1][0] == LINES[Stage.REVEAL]
                     app.delivery.events.put(('reply', 'START pump=3 ms=6000 preview=1'))
                     app._delivery_events(time.monotonic())
-                    assert app.led_canvas.itemcget(app.cells[2][0], 'fill') != '#38313e'
+                    assert app.led_canvas.itemcget(app.cells[2][0], 'fill') != IDLE_CELL
                     assert app.session.stage == Stage.DISPENSE
                     app.delivery.busy = False
                     app.delivery.events.put(('done', 'done'))
@@ -104,12 +136,13 @@ with tempfile.TemporaryDirectory() as directory, patch('dirtyminds.app.ROOT', Pa
             assert app.session.stage == Stage.COMPLETE, (app.session.stage, app.status.get())
             assert len(app.session.results) == 4
             assert app.session.delivery_complete
-            assert all(app.led_canvas.itemcget(row[0], 'fill') == '#38313e' for row in app.cells)
+            assert all(app.led_canvas.itemcget(row[0], 'fill') == IDLE_CELL for row in app.cells)
             record = json.loads(app.record_path.read_text(encoding='utf-8'))
             assert len(record['rounds']) == 4 and record['delivery_complete']
+            assert len(record['round_scripts']) == 4
             assert record['recipe']['amounts'] == [0, 0, 15, 0]
             if spoken:
-                round_calls = [voice for text, voice in app.voice.calls if text in [item.pitch for item in INGREDIENTS]]
+                round_calls = [voice for text, voice in app.voice.calls if text in [LINES[stage] for stage in ROUND_STAGES]]
                 assert round_calls == [item.voice_id for item in INGREDIENTS]
                 assert app.voice.calls[-1][0] == LINES[Stage.FAREWELL]
         # A failed delivery must stop without speaking the farewell or marking success.
@@ -125,6 +158,45 @@ with tempfile.TemporaryDirectory() as directory, patch('dirtyminds.app.ROOT', Pa
         assert app.session.results == [] and app.session.recipe is None
         app.stop()
         assert app.session.stage == Stage.STOPPED
-        print('PASS: silent and voiced four-round Tk sessions; independent scores, cast, LED/DONE gate, failure, Stop/restart, records and layout.')
+        # Real output handshakes first, starts on audio playback and waits for both
+        # the reveal and DONE, regardless of which finishes first.
+        app.mode.set(WATER)
+        for done_first in (True, False):
+            app.start()
+            app.voice.stop()
+            now = time.monotonic()
+            app.session.recipe = make_recipe([0, 0, .6, .8])
+            app.session._enter(Stage.REVEAL, now)
+            voice_count, cue_count = len(app.voice.calls), app.delivery.cues
+            app._stage_changed()
+            assert app.delivery.calls[-1] == ('COM7', [0, 0, 1000, 1500], WATER)
+            assert app.delivery.on_cue and len(app.voice.calls) == voice_count
+            call_count = len(app.delivery.calls)
+            app.delivery.events.put(('ready', 'Uno ready'))
+            app._delivery_events(now)
+            assert app.voice.calls[-1][0] == LINES[Stage.REVEAL]
+            assert app.delivery.cues == cue_count
+            root.after_cancel(app.after_id)
+            app.tick()
+            assert app.delivery.cues == cue_count + 1
+            if done_first:
+                app.delivery.busy = False
+                app.delivery.events.put(('done', 'Done'))
+                app._delivery_events(now)
+                assert app.session.stage == Stage.REVEAL and app.session.delivery_complete
+            app.voice.busy = False
+            app.session.voice_finished(now)
+            assert app.session.tick(now + 2)
+            app._stage_changed()
+            if not done_first:
+                assert app.session.stage == Stage.DISPENSE and not app.session.delivery_complete
+                app.delivery.busy = False
+                app.delivery.events.put(('done', 'Done'))
+                app._delivery_events(now)
+            assert app.session.stage == Stage.FAREWELL and app.session.delivery_complete
+            assert app.voice.calls[-1][0] == LINES[Stage.FAREWELL]
+            assert len(app.delivery.calls) == call_count
+            app.stop()
+        print('PASS: Tk rehearsals, hardware controls, real-output cue, DONE/farewell in either order, Stop/restart and layout.')
     finally:
         app.close()

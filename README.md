@@ -1,6 +1,72 @@
-# Dirty Minds — hardware update (working copy)
+# Dirty Minds / The Brine Bar
 
-**This working copy changes the hardware plan.** The original guide below describes the previous combined Feather pump/LED setup and is retained for historical reference only; its pump and LED wiring instructions no longer apply.
+Run `setup.cmd` once, then open `run.cmd`. The app starts with simulated input and
+screen rehearsal. Move the response slider during each of the four rounds to
+rehearse a blend. The previous combined Feather pump and LED setup is documented
+below for historical reference.
+
+## Operate the show
+
+Open **Hardware console** to enter the Feather IP, start or stop its live GSR
+monitor, select the Uno's USB port, and run **Check Uno**. The check reads the
+controller status and sends no motor commands. The event log includes sensor
+connection, session stages, script fallback, and controller replies.
+
+For bench work with water, set the seconds for each channel in the console. The
+fields start at one second and accept 0.1 to 10 seconds. Check **Enable individual
+water tests** to test one pump on demand. The times stay set while the app is open.
+
+Choose **Uno water rehearsal** under **Brine output** for an end-to-end run with
+the Feather or simulated input. Use water. The recipe selects the channels, and
+each selected pump runs for its configured time. A two-brine recipe runs those
+pumps sequentially. The displayed recipe volumes are for the eventual calibrated
+drink. **Calibrated pumps** uses measured flow rates and appears after you
+configure those rates and enable it in `.env`.
+
+For both physical output modes, the app connects to the Uno at the reveal and
+starts the sequence when playback of “The votes are in” begins. In a silent run,
+the Uno starts as soon as its connection is ready at the reveal. The farewell
+waits for both the reveal and the sequence to finish. **Stop all / Esc** cancels
+the monitor, audio, and active pump sequence. Close the separate Uno pump test
+window or Serial Monitor before running the show.
+
+Stop the bench monitor before starting a tasting. Select **Feather Wi-Fi** for
+session input to use the same IP from the console. The monitor and the tasting
+take turns connecting to the Feather. Qnect stays on its own manual controls.
+
+## Cast and fresh pitches
+
+Pearl, Olive Twist, Pepper, and Dill With It introduce themselves before their
+pitches. In **Four voices**, audition Natasha (playful whisper), Emily (soft
+whisper), AImee (ASMR), or Matthew (deep whisper). The olive and augurk now
+default to Natasha and Emily. The previous Sarah and Marleen default IDs are
+mapped to the new voices on startup. Other custom IDs in `.env` are respected.
+Library voices require access in your ElevenLabs account.
+
+**Whisper delivery** uses Eleven v4 by default. An explicit
+`ELEVENLABS_WHISPER_MODEL_ID` still takes precedence. **Breaths and sighs** adds
+one inline reaction in selected lines with v3 or v4. The **Test host** and
+**Listen** buttons let you hear those cues before a session. See the
+[ElevenLabs whisper catalog](https://elevenlabs.io/voice-library/whisper) and
+[breathing cue guide](https://elevenlabs.io/docs/help-center/product/core-capabilities/text-to-speech/can-you-make-voices-produce-the-sound-of-breathing).
+
+Add `OPENAI_API_KEY` to `.env` and restart to enable **Fresh pitches**. OpenAI
+writes four short fictional pitches in one request while the introduction and
+baseline run. Each character gets a different approach from the previous
+request. The app uses house scripts if generation fails or the result arrives
+after round one begins. Fresh spoken lines need ElevenLabs synthesis, which can
+add a wait before each round. For prepared offline audio, switch off **Fresh
+pitches** and run `prepare_voices.py` with the same cast and settings you intend to
+use in the app.
+
+OpenAI receives the fictional cast and their approaches. ElevenLabs receives the
+lines and delivery settings. The app keeps the spoken or displayed pitches,
+approaches, and corresponding aggregate GSR scores together in the local session
+file for manual comparison. GSR is a skin-conductance signal affected by factors
+including movement and contact. This version does not use it to infer desire or
+train a model.
+
+## Current hardware
 
 - **Feather HUZZAH32 + NeoPixel Wing:** GSR input over local Wi-Fi, live raw signal on the Wing.
 - **Arduino Uno:** four L298N pump channels over USB; screen rehearsal is the default.
@@ -8,7 +74,7 @@
 
 ## Feather Wi-Fi test
 
-1. Install the ESP32 board package and Adafruit NeoPixel library in Arduino IDE. Select the original **Adafruit ESP32 Feather**. Copy `arduino/feather_gsr_wifi/wifi_secrets.example.h` to `wifi_secrets.h` in that folder and fill in your Wi-Fi name/password. Never share or commit this file. Use the same trusted 2.4 GHz local network as the PC; guest isolation must be off.
+1. Install the ESP32 board package and Adafruit NeoPixel library in Arduino IDE. Select the original **Adafruit ESP32 Feather**. In the sketch folder, create `wifi_secrets.h` with `#define WIFI_SSID "your network"` and `#define WIFI_PASSWORD "your password"` on separate lines. Use the same trusted 2.4 GHz local network as the PC with guest isolation disabled.
 2. Upload `feather_gsr_wifi.ino`; open Serial Monitor at 115200 to read `Feather IP`. For a first test use a potentiometer between Feather **3V** and **GND**, wiper to **GPIO34 / A2**. Never apply more than 3.3 V to the ADC. The bar shows raw ADC value.
 3. In the app select **Feather Wi-Fi**, enter that IP in the GSR field, select **Screen rehearsal**, and begin. TCP port 8765 streams values at about 20 Hz. Set `GSR_MAX=1023` and calibrate `GSR_SPAN` for the actual circuit. The app stops a session on a missing stream; it does not substitute simulated readings. The connection is unencrypted and unauthenticated: use a trusted private network, not the public internet.
 4. Your DIY GSR circuit still needs a suitable current-limited, battery-powered, electrically isolated body-contact design. This code alone does not make electrodes safe. Do not connect a participant to a USB-powered or mains-connected prototype.

@@ -46,11 +46,14 @@ class LightsWorker:
         return self.start_sequence(port, preview_durations(pump))
 
     def start_sequence(self, port, durations):
-        if self.busy:
-            return False
         validate_durations(durations)
         if not port.strip():
             raise ValueError("Choose the Feather USB port first.")
+        return self._start_job(port, list(durations))
+
+    def _start_job(self, port, durations):
+        if self.busy:
+            return False
         # Drop events from a completed test before starting another.
         while True:
             try:
@@ -58,7 +61,7 @@ class LightsWorker:
             except queue.Empty:
                 break
         self.cancelled = threading.Event()
-        self.thread = threading.Thread(target=self._run, args=(port, list(durations)), daemon=True)
+        self.thread = threading.Thread(target=self._run, args=(port, durations), daemon=True)
         self.thread.start()
         return True
 
