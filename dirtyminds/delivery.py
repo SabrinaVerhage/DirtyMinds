@@ -2,6 +2,7 @@
 import math
 import threading
 
+from .core import DEFAULT_PUMP_ORDER, INGREDIENTS
 from .lights import LightsWorker, run_lights_preview
 from .pumps import PumpCancelled, PumpClient, PumpError, check_cancelled, seconds_to_ms, validate_durations
 
@@ -11,7 +12,9 @@ MOTORS = "Calibrated pumps"
 WATER = "Uno water rehearsal"
 MOTOR_MODES = (WATER, MOTORS)
 UNO_CHECK = "Uno status"
+PUMP_CHANNELS = 4
 MAX_WATER_MS = 10_000
+MIN_PUMP_MS = 100
 
 
 def water_test_ms(value):
@@ -21,25 +24,58 @@ def water_test_ms(value):
     return milliseconds
 
 
-def delivery_durations(recipe, mode, rates=(), *, real_enabled=False, water_ms=()):
+def _calibrated_durations(amounts, rates):
+    """Give every used pump a legal pulse without increasing the total dose."""
+    durations = [0] * len(amounts)
+    remaining = [i for i, ml in enumerate(amounts) if ml > 0]
+    volume_left = math.fsum(amounts)
+    while remaining:
+        weight = math.fsum(amounts[i] for i in remaining)
+        shares = {i: volume_left * (amounts[i] / weight) for i in remaining}
+        short = [i for i in remaining if shares[i] < rates[i] * (MIN_PUMP_MS / 1000) - 1e-12]
+        if not short:
+            for i, ml in shares.items():
+                ms = ml / rates[i] * 1000
+                if not math.isfinite(ms):
+                    raise ValueError("A pump duration exceeds the controller's range. Check its flow rate.")
+                durations[i] = max(MIN_PUMP_MS, math.floor(ms + 1e-8))
+            break
+        for i in short:
+            volume_left -= rates[i] * (MIN_PUMP_MS / 1000)
+            durations[i] = MIN_PUMP_MS
+        if volume_left < -1e-12:
+            raise ValueError("The pump minimum pulses exceed 15 ml. Check the measured flow rates.")
+        remaining = [i for i in remaining if i not in short]
+    return durations
+
+
+def delivery_durations(recipe, mode, rates=(), *, real_enabled=False, water_ms=(),
+                       pump_order=DEFAULT_PUMP_ORDER):
     if mode not in (SCREEN, LEDS, *MOTOR_MODES):
         raise ValueError("Choose a delivery mode.")
+    count = len(INGREDIENTS)
     if mode == MOTORS:
         if not real_enabled:
             raise ValueError("Calibrated pumps are disabled. Use Uno water rehearsal for timed tests.")
-        if len(rates) != 4 or not all(math.isfinite(rate) and rate > 0 for rate in rates):
-            raise ValueError("Set all four measured PUMP_ML_PER_SECOND rates before running pumps.")
-        durations = [round(ml / rate * 1000) for ml, rate in zip(recipe.amounts, rates)]
+        if len(rates) not in (count, PUMP_CHANNELS) or not all(
+                math.isfinite(rate) and rate > 0 for rate in rates[:count]):
+            raise ValueError("Set three measured PUMP_ML_PER_SECOND rates before running pumps.")
+        durations = _calibrated_durations(recipe.amounts, rates)
     elif mode == WATER:
-        if len(water_ms) != 4 or any(type(ms) is not int or not 100 <= ms <= MAX_WATER_MS for ms in water_ms):
-            raise ValueError("Enter a water-test duration for each of the four pumps.")
-        durations = [ms if ml else 0 for ml, ms in zip(recipe.amounts, water_ms)]
+        if len(water_ms) not in (count, PUMP_CHANNELS) or any(
+                type(ms) is not int or not 100 <= ms <= MAX_WATER_MS for ms in water_ms[:count]):
+            raise ValueError("Enter a water-test duration for each of the three brine pumps.")
+        times_by_ingredient = dict(zip(pump_order, water_ms))
+        durations = [times_by_ingredient[item.key] if ml else 0
+                     for item, ml in zip(INGREDIENTS, recipe.amounts)]
     else:
-        durations = [round(ml / recipe.brine_ml * 6000) for ml in recipe.amounts]
-    if any(ml > 0 and ms < 100 for ml, ms in zip(recipe.amounts, durations)):
-        raise ValueError("A selected brine needs at least 100 ms. Check the measured pump rates.")
-    validate_durations(durations)
-    return durations
+        durations = [max(MIN_PUMP_MS, round(ml / recipe.brine_ml * 6000)) if ml else 0
+                     for ml in recipe.amounts]
+    # Preserve the controller protocol. The fourth channel is bench-only.
+    by_ingredient = {item.key: ms for item, ms in zip(INGREDIENTS, durations)}
+    channels = [by_ingredient[key] for key in pump_order] + [0]
+    validate_durations(channels)
+    return channels
 
 
 class DeliveryWorker(LightsWorker):

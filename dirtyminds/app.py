@@ -1,26 +1,37 @@
 from collections import deque
+from dataclasses import replace
 import math
 import os
 from pathlib import Path
 import queue
 import re
 import time
+import traceback
 import tkinter as tk
 from tkinter import ttk
 
-from .core import INGREDIENTS, VOICE_CUES, Session, Stage, TEST_LINE
-from .delivery import DeliveryWorker, SCREEN, LEDS, MOTORS, MOTOR_MODES, WATER, delivery_durations, water_test_ms
+from .core import (DEFAULT_PUMP_ORDER, INGREDIENTS, INGREDIENT_BY_KEY, LEGACY_PUMP_ORDER,
+                   PROFESSOR_VOICE_ID, ROUND_STAGES, SOUND_CUES, VOICE_CUES, WAITING_TUNE,
+                   Session, Stage, TEST_LINE)
+from .delivery import DeliveryWorker, SCREEN, LEDS, MOTORS, MOTOR_MODES, PUMP_CHANNELS, WATER, delivery_durations, water_test_ms
+from .debug_log import DebugLog
 from .hardware_ui import HardwareWindow
-from .sensors import SerialInput, WirelessInput, Simulator, list_ports
-from .scripts import DEFAULT_MODEL, ScriptRequest, choose_tactics
+from .patient_ui import PatientTimeline, PatientView
+from .sensors import InputOpening, SerialInput, WirelessInput, Simulator, list_ports
+from .scripts import DEFAULT_MODEL, WritingRequest, choose_tactics, generate_intro, generate_lines, generate_name
 from .voice import ElevenVoice, VoiceWorker
-from .records import new_record_path, save_record
+from .records import (load_connections, load_pump_calibration, load_pump_order, new_record_path,
+                      recent_recipe_names, save_connections, save_pump_calibration, save_pump_order,
+                      save_record)
 
 ROOT = Path(__file__).resolve().parent.parent
 BG, PANEL, TEXT, MUTED = "#111814", "#1b2620", "#f6efe1", "#b0bdb0"
 ACCENT, GREEN = "#e1ed9a", "#a6bf9e"
-ROW_COLORS = ("#f3c8bf", "#d9e893", "#ffa080", "#a6d7bf")
+ROW_COLORS = ("#f3c8bf", "#e7ca72", "#d9e893")
+ASSETS = ROOT / "assets"
+CAST_ART = ASSETS / "diagnostic-cast.png"
 IDLE_CELL = "#314138"
+USB_SENSOR_SOURCES = ("Feather USB", "Arduino USB")
 
 
 def load_config():
@@ -43,35 +54,49 @@ def load_config():
             raise ValueError
     except ValueError:
         raise ValueError("ELEVENLABS_WHISPER_PAUSE_MS must be an integer from 0 to 3000.") from None
-    enabled = os.getenv("ENABLE_REAL_PUMPS", "false").strip().lower() == "true"
-    rates = ()
-    if enabled:
+    pump_order = load_pump_order(ROOT / "output" / "pump_channels.json")
+    calibration_path = ROOT / "output" / "pump_calibration.json"
+    rates = load_pump_calibration(calibration_path, pump_order)
+    legacy_enabled = os.getenv("ENABLE_REAL_PUMPS", "false").strip().lower() == "true"
+    calibration_status = ""
+    if not rates and calibration_path.exists():
+        calibration_status = "Pump calibration is unavailable for this assignment. Calibrate in Hardware console."
+    elif not rates and legacy_enabled and pump_order == LEGACY_PUMP_ORDER:
         try:
             rates = tuple(float(x.strip()) for x in os.getenv("PUMP_ML_PER_SECOND", "").split(","))
-            if len(rates) != 4 or not all(math.isfinite(x) and x > 0 for x in rates):
+            if len(rates) not in (len(INGREDIENTS), PUMP_CHANNELS) or not all(
+                    math.isfinite(x) and x > 0 for x in rates[:len(INGREDIENTS)]):
                 raise ValueError
         except ValueError:
-            raise ValueError("Real pumps need four positive, measured PUMP_ML_PER_SECOND rates in .env.") from None
-    previous_defaults = {"olive": "EXAVITQu4vr4xnSDxMaL", "pickle": "AIFcvMreCoOxyPTbUrwe"}
+            rates = ()
+            calibration_status = "Pump rates need calibration. Open the Hardware console."
+    elif not rates and legacy_enabled:
+        calibration_status = "Pump assignments changed. Recalibrate before dispensing."
+    previous_defaults = {
+        "onion": ("1ykC5GeLM4dP82qkyo91",),
+        "olive": ("EXAVITQu4vr4xnSDxMaL", "PB6BdkFkZLbI39GHdnbQ"),
+        "jalapeno": ("A6TsrDqI2qlO9AWAfZHY",),
+    }
     cast = []
     for item in INGREDIENTS:
         ident = os.getenv(f"VOICE_{item.key.upper()}", "").strip()
-        cast.append(item.voice_id if not ident or ident == previous_defaults.get(item.key) else ident)
+        cast.append(item.voice_id if not ident or ident in previous_defaults[item.key] else ident)
     return {
         "maximum": maximum, "span": span, "baud": baud, "port": os.getenv("SERIAL_PORT", ""),
         "api_key": os.getenv("ELEVENLABS_API_KEY", "").strip(),
-        "voice_id": os.getenv("ELEVENLABS_VOICE_ID", "1ykC5GeLM4dP82qkyo91").strip(),
         "model_id": os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2").strip(),
         "whisper": os.getenv("ELEVENLABS_WHISPER", "true").strip().lower() in ("true", "1", "yes"),
         "whisper_model_id": os.getenv("ELEVENLABS_WHISPER_MODEL_ID", "eleven_v4").strip() or "eleven_v4",
         "whisper_pause_ms": pause,
         "voice_effects": os.getenv("ELEVENLABS_VOICE_EFFECTS", "true").strip().lower() in ("true", "1", "yes"),
         "round_voices": cast,
+        "professor_voice": os.getenv("VOICE_PROFESSOR", "").strip() or PROFESSOR_VOICE_ID,
         "openai_key": os.getenv("OPENAI_API_KEY", "").strip(),
         "openai_model": os.getenv("OPENAI_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL,
         "feather_host": os.getenv("FEATHER_HOST", "").strip(),
         "pump_port": os.getenv("PUMP_PORT", "").strip(),
-        "real_pumps": enabled, "pump_rates": rates,
+        "real_pumps": bool(rates), "pump_rates": rates, "calibration_status": calibration_status,
+        "pump_order": pump_order,
     }
 
 
@@ -80,64 +105,85 @@ class App:
         self.root, self.config = root, config
         self.session, self.simulator = Session(config["span"]), Simulator()
         self.serial = self.last_reading = self.cast_window = self.hardware_window = None
+        self.patient_window = self.input_opening = None
+        self.pump_order = config.get("pump_order", DEFAULT_PUMP_ORDER)
+        self.active_pump = None
+        self.patient_timeline = PatientTimeline()
+        self.patient_timeline.advance(self.session.stage)
+        self.recent_names = deque(recent_recipe_names(ROOT / "output" / "sessions"), maxlen=24)
+        self.waiting_tune_started = False
+        self.voice_requested_at = None
+        self.last_tick = time.monotonic()
+        self.graph_state = None
+        self.debug = DebugLog(ROOT / "output" / "debug.log")
+        root.report_callback_exception = self._callback_error
         self.record_path = None
         self.record_error = ""
         self.session_source = self.session_mode = ""
         self.session_voices, self.durations = [], []
         self.session_scripts, self.previous_tactics = [], ()
-        self.script_request = self.generated_lines = None
+        self.script_request = self.generated_lines = self.name_request = self.intro_request = None
         self.accept_script = False
         self.history = deque(maxlen=300)
         self.events = deque(maxlen=180)
         self.delivery = DeliveryWorker()
+        self.round_voices = list(config.get("round_voices", [item.voice_id for item in INGREDIENTS]))
+        self.connection_path = ROOT / "output" / "connections.json"
+        self.saved_connections = load_connections(self.connection_path)
+        self.professor_voice = config.get("professor_voice", PROFESSOR_VOICE_ID)
         self.voice = VoiceWorker(ElevenVoice(
-            config["api_key"], config["voice_id"], config["model_id"], ROOT / ".cache" / "voice",
+            config["api_key"], self.professor_voice, config["model_id"], ROOT / ".cache" / "voice",
             whisper=config.get("whisper", True), whisper_model_id=config.get("whisper_model_id", "eleven_v4"),
             whisper_pause_ms=config.get("whisper_pause_ms", 900)))
-        self.source, self.port = tk.StringVar(value="Simulated"), tk.StringVar(value=config["port"])
+        self.source = tk.StringVar(value="Simulated")
         old_port = config["port"]
-        self.feather_host = tk.StringVar(value=config.get("feather_host") or
-                                         (old_port if "." in old_port or ":" in old_port else ""))
+        old_host = old_port if "." in old_port or ":" in old_port else ""
+        self.port = tk.StringVar(value=self.saved_connections.get("gsr_usb", "" if old_host else old_port))
+        self.feather_host = tk.StringVar(value=self.saved_connections.get(
+            "feather_ip", config.get("feather_host") or old_host))
         self.silent = tk.BooleanVar(value=not bool(config["api_key"]))
         self.whisper = tk.BooleanVar(value=config.get("whisper", True))
         self.effects = tk.BooleanVar(value=config.get("voice_effects", True))
         self.fresh_scripts = tk.BooleanVar(value=bool(config.get("openai_key")))
         self.voice_choices = {
+            **{item.voice_name: item.voice_id for item in INGREDIENTS},
             "Nora · Cozy ASMR": "1ykC5GeLM4dP82qkyo91",
             "Natasha · playful whisper": "PB6BdkFkZLbI39GHdnbQ",
             "Emily · soft whisper": "1cxc5c3E9K6F1wlqOJGV",
             "AImee · ASMR whisper": "GL7nHO5mDrxcHlJPJK5T",
             "Matthew · deep whisper": "uCAKWh24Y93ESUjKwRGP",
-            "Trevor · Whisper app": "17JdVkQHD6PE3HPohzr2",
+            "Trevor Whisper · Australian": "17JdVkQHD6PE3HPohzr2",
             "Shanni · sultry": "A6TsrDqI2qlO9AWAfZHY",
             "Marleen · Dutch": "AIFcvMreCoOxyPTbUrwe",
         }
-        selected = next((name for name, ident in self.voice_choices.items() if ident == config["voice_id"]), "Voice from .env")
-        self.voice_choices[selected] = config["voice_id"]
-        self.voice_choice = tk.StringVar(value=selected)
-        self.round_voices = list(config.get("round_voices", [item.voice_id for item in INGREDIENTS]))
         self.ports = list_ports()
-        self.pump_port = tk.StringVar(value=config.get("pump_port") or (self.ports[0] if len(self.ports) == 1 else ""))
+        default_pump = config.get("pump_port") or (self.ports[0] if len(self.ports) == 1 else "")
+        self.pump_port = tk.StringVar(value=self.saved_connections.get("pump_usb", default_pump))
         self.mode = tk.StringVar(value=config.get("delivery_mode", SCREEN))
-        self.water_times = [tk.StringVar(value="1.0") for _ in INGREDIENTS]
+        self.water_times = [tk.StringVar(value="5.0") for _ in range(PUMP_CHANNELS)]
         self.session_water_ms = ()
         self.intensity = tk.DoubleVar(value=40)
-        self.stage_text = tk.StringVar(value="Four temptations. One dirty mind.")
-        self.status = tk.StringVar(value="Ready for rehearsal.")
+        self.stage_text = tk.StringVar(value=Stage.READY.value)
+        self.status = tk.StringVar(value=config.get("calibration_status") or "Ready for rehearsal.")
         self.reading_text = tk.StringVar(value="RAW —    BASELINE —    CHANGE —")
-        self.line_text = tk.StringVar(value="Four little voices have their eye on your martini. Take a seat and see who gets in.")
-        self.recipe_text = tk.StringVar(value="Your blend appears after the fourth round.")
-        self.output_text = tk.StringVar(value="Awaiting your blend")
+        self.line_text = tk.StringVar(value="An experimental procedure for detecting inappropriate responses and prescribing corrective cocktails.")
+        self.recipe_text = tk.StringVar(value="Your prescription will appear after the three diagnostic stimuli.")
+        self.output_text = tk.StringVar(value="Awaiting your prescription")
+        self.note("App / started")
         self.note(self.status.get())
         self.status.trace_add("write", lambda *_: self.note(self.status.get()))
         self._build()
         root.protocol("WM_DELETE_WINDOW", self.close)
-        root.bind("<Escape>", lambda event: self.stop())
+        root.bind("<Escape>", self.escape)
+        root.bind("<F11>", self.toggle_fullscreen)
+        root.bind("<F10>", self.toggle_patient_view)
+        root.bind("<F8>", self.new_session_shortcut)
         self.after_id = root.after(100, self.tick)
 
     def _build(self):
         root = self.root
-        root.title("Dirty Minds / The Brine Bar")
+        root.title("Dirty Minds · The Dirty Mind Diagnostic")
+        root.attributes("-fullscreen", True)
         root.geometry("1060x790")
         root.minsize(960, 750)
         root.configure(bg=BG)
@@ -150,7 +196,7 @@ class App:
         style.configure("Title.TLabel", foreground=TEXT, font=("Georgia", 23))
         style.configure("Card.TFrame", background=PANEL)
         style.configure("Card.TLabel", background=PANEL, foreground=TEXT)
-        style.configure("Quote.TLabel", background=PANEL, foreground=TEXT, font=("Georgia", 16))
+        style.configure("Quote.TLabel", background=PANEL, foreground=TEXT, font=("Georgia", 14))
         style.configure("TLabelframe", background=BG, bordercolor=GREEN)
         style.configure("TLabelframe.Label", background=BG, foreground=ACCENT, font=("Segoe UI", 9, "bold"))
         style.configure("TEntry", fieldbackground=PANEL, foreground=TEXT, insertcolor=TEXT)
@@ -164,16 +210,16 @@ class App:
         style.map("TCombobox", fieldbackground=[("readonly", PANEL), ("disabled", PANEL)], foreground=[("disabled", MUTED), ("readonly", TEXT)])
         style.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor=PANEL)
         style.configure("Horizontal.TScale", background=BG, troughcolor=PANEL)
-        shell = ttk.Frame(root, padding=(24, 18))
+        shell = ttk.Frame(root, padding=(24, 12))
         shell.pack(fill="both", expand=True)
         shell.columnconfigure(0, weight=1)
         shell.rowconfigure(1, weight=1)
         header = ttk.Frame(shell)
-        header.grid(row=0, sticky="ew", pady=(0, 14))
+        header.grid(row=0, sticky="ew", pady=(0, 10))
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="ROBOEXOTICA   /   THE BRINE BAR", style="Kicker.TLabel").grid(sticky="w")
-        ttk.Label(header, text="Dirty Minds", foreground=TEXT, font=("Georgia", 38)).grid(row=1, sticky="w")
-        ttk.Label(header, text="4 WHISPERS   /   1 MARTINI", style="Kicker.TLabel").grid(row=1, column=1, sticky="se", pady=(0, 8))
+        ttk.Label(header, text="DEPARTMENT OF INAPPROPRIATE RESPONSES", style="Kicker.TLabel").grid(sticky="w")
+        ttk.Label(header, text="DIRTY MINDS", foreground=TEXT, font=("Georgia", 38)).grid(row=1, sticky="w")
+        ttk.Label(header, text="3 STIMULI   /   1 PRESCRIPTION", style="Kicker.TLabel").grid(row=1, column=1, sticky="se", pady=(0, 8))
         ttk.Separator(header).grid(row=2, columnspan=2, sticky="ew", pady=(6, 0))
         body = ttk.Frame(shell)
         body.grid(row=1, sticky="nsew")
@@ -184,7 +230,7 @@ class App:
         def label(text):
             ttk.Label(controls, text=text, style="Kicker.TLabel").grid(sticky="w", pady=(7, 3))
         label("01   SIGNAL INPUT")
-        self.source_box = ttk.Combobox(controls, textvariable=self.source, values=("Simulated", "Feather Wi-Fi", "Arduino USB"), state="readonly", width=25)
+        self.source_box = ttk.Combobox(controls, textvariable=self.source, values=("Simulated", *USB_SENSOR_SOURCES, "Feather Wi-Fi"), state="readonly", width=25)
         self.source_box.grid(sticky="ew")
         self.source_box.bind("<<ComboboxSelected>>", lambda event: self._controls())
         self.input_label = ttk.Label(controls, text="Input address", style="Muted.TLabel")
@@ -196,23 +242,20 @@ class App:
         self.slider = ttk.Scale(controls, from_=0, to=100, variable=self.intensity)
         self.slider.grid(sticky="ew", pady=4)
         label("02   VOICE & SCRIPT")
-        self.voice_box = ttk.Combobox(controls, textvariable=self.voice_choice, values=tuple(self.voice_choices), state="readonly", width=25)
-        self.voice_box.grid(sticky="ew")
-        self.voice_box.bind("<<ComboboxSelected>>", lambda event: self.select_voice())
         self.whisper_box = ttk.Checkbutton(controls, text="Whisper delivery", variable=self.whisper, command=self.set_voice_style)
         self.whisper_box.grid(sticky="w", pady=(5, 0))
         self.silent_box = ttk.Checkbutton(controls, text="Silent rehearsal", variable=self.silent)
         self.silent_box.grid(sticky="w")
         self.effects_box = ttk.Checkbutton(controls, text="Breaths and sighs", variable=self.effects)
         self.effects_box.grid(sticky="w")
-        self.script_box = ttk.Checkbutton(controls, text="Fresh pitches · OpenAI" if self.config.get("openai_key")
-                                        else "Fresh pitches · needs API key", variable=self.fresh_scripts)
+        self.script_box = ttk.Checkbutton(controls, text="Fresh script · OpenAI" if self.config.get("openai_key")
+                                        else "Fresh script · needs API key", variable=self.fresh_scripts)
         self.script_box.grid(sticky="w")
         voice_actions = ttk.Frame(controls)
         voice_actions.grid(sticky="ew", pady=5)
-        self.test_button = ttk.Button(voice_actions, text="Test host", command=self.test_voice)
+        self.test_button = ttk.Button(voice_actions, text="Test headphones", command=self.test_voice)
         self.test_button.pack(side="left")
-        self.cast_button = ttk.Button(voice_actions, text="Four voices…", command=self.edit_cast)
+        self.cast_button = ttk.Button(voice_actions, text="Three voices…", command=self.edit_cast)
         self.cast_button.pack(side="left", padx=(6, 0))
         label("03   BRINE OUTPUT")
         modes = (SCREEN, WATER, MOTORS) if self.config.get("real_pumps") else (SCREEN, WATER)
@@ -221,36 +264,42 @@ class App:
         self.mode_box.bind("<<ComboboxSelected>>", lambda event: self._controls())
         self.hardware_button = ttk.Button(controls, text="Hardware console…", command=self.open_hardware)
         self.hardware_button.grid(sticky="ew", pady=(5, 0))
-        self.start_button = tk.Button(controls, text="Begin session", command=self.start, bg=ACCENT, fg=BG,
+        self.start_button = tk.Button(controls, text="New session · F8", command=self.start, bg=ACCENT, fg=BG,
             activebackground=TEXT, font=("Segoe UI", 12, "bold"), relief="flat", pady=10)
         self.start_button.grid(sticky="ew", pady=(7, 5))
         ttk.Button(controls, text="Stop / Esc", command=self.stop, style="Stop.TButton").grid(sticky="ew")
+        ttk.Button(controls, text="Patient view · F10", command=self.toggle_patient_view).grid(sticky="ew", pady=(5, 0))
+        ttk.Button(controls, text="Open debug log", command=self.open_debug_log).grid(sticky="ew", pady=(4, 0))
+        ttk.Label(controls, text="F11 · toggle fullscreen", style="Muted.TLabel").grid(sticky="w", pady=(5, 0))
         content = ttk.Frame(body)
         content.grid(row=0, column=1, sticky="nsew")
-        ttk.Label(content, text="THE TASTING", style="Kicker.TLabel").pack(anchor="w")
+        ttk.Label(content, text="THE DIRTY MIND DIAGNOSTIC", style="Kicker.TLabel").pack(anchor="w")
         ttk.Label(content, textvariable=self.stage_text, style="Title.TLabel").pack(anchor="w", pady=(2, 0))
         self.progress_bar = ttk.Progressbar(content, maximum=100)
         self.progress_bar.pack(fill="x", pady=(8, 10))
-        quote = ttk.Frame(content, style="Card.TFrame", padding=(14, 11))
+        quote = ttk.Frame(content, style="Card.TFrame", padding=(14, 8))
         quote.pack(fill="x")
         self.script_label = ttk.Label(quote, textvariable=self.line_text, wraplength=620, style="Quote.TLabel")
         self.script_label.pack(fill="x")
-        self.canvas = tk.Canvas(content, height=59, bg=PANEL, highlightthickness=0)
+        self.canvas = tk.Canvas(content, height=52, bg=PANEL, highlightthickness=0)
         self.canvas.pack(fill="x", pady=(10, 4))
         ttk.Label(content, textvariable=self.reading_text, foreground=GREEN, font=("Consolas", 10)).pack(anchor="w")
         results = ttk.Frame(content)
         results.pack(fill="x", pady=(8, 10))
         results.columnconfigure(1, weight=1)
+        if CAST_ART.is_file():
+            self.cast_art = tk.PhotoImage(file=str(CAST_ART)).subsample(9)
+            ttk.Label(results, image=self.cast_art).grid(
+                row=0, column=2, rowspan=len(INGREDIENTS), padx=(16, 0))
         self.result_texts = []
         for i, ingredient in enumerate(INGREDIENTS):
-            ttk.Label(results, text=f"0{i+1}   {ingredient.character}", foreground=ROW_COLORS[i],
+            ttk.Label(results, text=f"0{i+1}   {ingredient.name}", foreground=ROW_COLORS[i],
                       font=("Segoe UI", 10, "bold")).grid(row=i, column=0, sticky="w", padx=(0, 12), pady=2)
-            ttk.Label(results, text=ingredient.name, style="Muted.TLabel").grid(row=i, column=1, sticky="w", padx=(0, 12))
             value = tk.StringVar(value="Waiting")
             self.result_texts.append(value)
-            ttk.Label(results, textvariable=value).grid(row=i, column=2, sticky="e")
+            ttk.Label(results, textvariable=value).grid(row=i, column=1, sticky="w")
         ttk.Separator(content).pack(fill="x", pady=(0, 8))
-        ttk.Label(content, text="YOUR BLEND", style="Kicker.TLabel").pack(anchor="w")
+        ttk.Label(content, text="COCKTAIL PRESCRIPTION", style="Kicker.TLabel").pack(anchor="w")
         self.recipe_label = ttk.Label(content, textvariable=self.recipe_text, wraplength=640)
         self.recipe_label.pack(fill="x", pady=(4, 8))
         output = ttk.Frame(content)
@@ -258,7 +307,7 @@ class App:
         self.led_canvas = tk.Canvas(output, width=150, height=52, bg=BG, highlightthickness=0)
         self.led_canvas.pack(side="left")
         self.cells = [[self.led_canvas.create_rectangle(2+x*18, 2+y*12, 16+x*18, 11+y*12,
-                       fill=IDLE_CELL, outline="") for x in range(8)] for y in range(4)]
+                       fill=IDLE_CELL, outline="") for x in range(8)] for y in range(len(INGREDIENTS))]
         ttk.Label(output, textvariable=self.output_text, wraplength=300, foreground=MUTED).pack(side="left", padx=10)
         self.copy_button = ttk.Button(output, text="Copy recipe", command=self.copy_recipe, state="disabled")
         self.copy_button.pack(side="right")
@@ -270,22 +319,96 @@ class App:
         content.bind("<Configure>", lambda event: self._wrap(event.width))
         self._controls()
 
+    def toggle_patient_view(self, event=None):
+        if self.patient_window:
+            self.close_patient_view()
+        elif not self.cast_window:
+            self._update_patient_view()
+            self.patient_window = PatientView(self.root, self.patient_timeline, self.close_patient_view, self.stop,
+                                              self.new_session_shortcut)
+            self.note("Display / patient view opened")
+        return "break"
+
+    def new_session_shortcut(self, event=None):
+        self.start()
+        return "break"
+
+    def _update_patient_view(self):
+        stage = self.session.stage
+        title = ""
+        if self.session.recipe and (stage == Stage.COMPLETE or
+                                    (stage == Stage.FAREWELL and self.session.playback_has_started)):
+            title = self.session.recipe.name
+        activity = ""
+        if self.active_pump and stage in (Stage.REVEAL, Stage.DISPENSE):
+            activity = f"PUMPING {self.pump_ingredients[self.active_pump - 1].name.upper()}"
+        changed = self.patient_timeline.advance(stage, title, activity)
+        if changed and self.patient_window:
+            self.patient_window.render(self.patient_timeline)
+
+    def close_patient_view(self):
+        if self.patient_window:
+            self.patient_window.close()
+            self.patient_window = None
+            self.root.lift()
+            self.root.focus_force()
+            self.note("Display / returned to operator view")
+
+    def open_debug_log(self):
+        try:
+            os.startfile(self.debug.path)
+        except OSError:
+            self.status.set(f"Debug log is unavailable at {self.debug.path}")
+
+    def _callback_error(self, exc_type, exc, tb):
+        frames = " > ".join(f"{Path(frame.filename).name}:{frame.lineno} {frame.name}"
+                            for frame in traceback.extract_tb(tb))
+        self.note(f"UI / {exc_type.__name__} at {frames}")
+        self.stop("The app encountered an error. Open the debug log for details.")
+
+    def toggle_fullscreen(self, event=None):
+        self.root.attributes("-fullscreen", not self.root.attributes("-fullscreen"))
+        return "break"
+
+    def escape(self, event=None):
+        if (self.session.active or self.input_opening or self.voice.busy or self.delivery.busy
+                or self.hardware_window is not None):
+            self.stop()
+        else:
+            self.root.attributes("-fullscreen", False)
+        return "break"
+
+    def remember_connections(self):
+        values = {"feather_ip": self.feather_host.get().strip(),
+                  "gsr_usb": self.port.get().strip(), "pump_usb": self.pump_port.get().strip()}
+        if values == self.saved_connections or not any(values.values()) and not self.saved_connections:
+            return
+        try:
+            save_connections(self.connection_path, values)
+        except OSError:
+            self.note("Could not remember the connection settings.")
+        else:
+            self.saved_connections = values
+
     def _wrap(self, width):
         self.script_label.configure(wraplength=max(300, width - 28))
         self.recipe_label.configure(wraplength=max(300, width))
 
     def _controls(self):
-        monitoring = self.hardware_window is not None and self.hardware_window.sensor is not None
-        locked = self.session.active or self.voice.busy or self.delivery.busy or self.cast_window is not None
-        for widget in (self.source_box, self.voice_box, self.mode_box):
+        hardware = self.hardware_window
+        monitoring = bool(hardware and (hardware.monitoring or hardware.pump_setup_open))
+        locked = bool(self.input_opening or self.session.active or self.voice.busy or self.delivery.busy
+                      or self.cast_window is not None)
+        for widget in (self.source_box, self.mode_box):
             widget.configure(state="disabled" if locked else "readonly")
         source = self.source.get()
         if source != self.port_source:
             self.port_source = source
             self.port_box.configure(textvariable=self.feather_host if source == "Feather Wi-Fi" else self.port,
                                     values=() if source == "Feather Wi-Fi" else self.ports)
-            self.input_label.configure(text={"Feather Wi-Fi": "Feather IP address", "Arduino USB": "Sensor USB port"}
-                                      .get(source, "No device needed"))
+            labels = {"Feather Wi-Fi": "Feather IP address", "Feather USB": "Feather USB port",
+                      "Arduino USB": "Sensor USB port"}
+            self.input_label.configure(text=labels.get(source, "No device needed"))
         edit_input = not locked and source != "Simulated" and not (monitoring and source == "Feather Wi-Fi")
         self.port_box.configure(state="normal" if edit_input else "disabled")
         self.slider.configure(state="normal" if source == "Simulated" else "disabled")
@@ -301,6 +424,7 @@ class App:
         if self.events and self.events[-1].split("  ", 1)[1] == message:
             return
         self.events.append(line)
+        self.debug.write(message)
         if self.hardware_window:
             self.hardware_window.append(line)
 
@@ -318,32 +442,81 @@ class App:
         self.status.set("USB ports refreshed." if self.ports else "No USB serial ports found.")
         self._controls()
 
-    def start(self):
-        if self.session.active or self.voice.busy or self.delivery.busy or self.cast_window:
+    @property
+    def pump_ingredients(self):
+        return tuple(INGREDIENT_BY_KEY[key] for key in self.pump_order)
+
+    def apply_pump_order(self, order):
+        if order == self.pump_order:
             return
-        if self.hardware_window and self.hardware_window.sensor:
+        save_pump_order(ROOT / "output" / "pump_channels.json", order)
+        self.pump_order = order
+        self.config["pump_rates"] = ()
+        self.config["real_pumps"] = False
+        if self.mode.get() == MOTORS:
+            self.mode.set(SCREEN)
+        self.mode_box.configure(values=(SCREEN, WATER))
+        self.status.set("Pump assignments saved. Calibrate the new assignment before dispensing.")
+        if self.hardware_window:
+            self.hardware_window.refresh_pump_labels()
+
+    def apply_pump_calibration(self, rates):
+        save_pump_calibration(ROOT / "output" / "pump_calibration.json", rates, self.pump_order)
+        self.config["pump_rates"] = rates
+        self.config["real_pumps"] = True
+        self.mode_box.configure(values=(SCREEN, WATER, MOTORS))
+        self.status.set("Calibration saved. Select Calibrated pumps when ready to dispense.")
+
+    def start(self):
+        if self.input_opening or self.session.active or self.voice.busy or self.delivery.busy or self.cast_window:
+            return
+        if self.hardware_window and (self.hardware_window.monitoring or self.hardware_window.pump_setup_open):
             return
         self.voice.stop()
+        self.remember_connections()
         try:
             mode = self.mode.get()
             if mode not in (SCREEN, LEDS, *MOTOR_MODES) or (mode == MOTORS and not self.config.get("real_pumps")):
                 raise ValueError("Choose Screen rehearsal, Uno water rehearsal, or enabled calibrated pumps.")
             if mode != SCREEN and not self.pump_port.get().strip():
                 raise ValueError("Choose the Uno USB port in the hardware console, or select Screen rehearsal.")
-            self.session_water_ms = tuple(water_test_ms(value.get()) for value in self.water_times) if mode == WATER else ()
-            if self.source.get() == "Feather Wi-Fi":
-                self.serial = WirelessInput(self.feather_host.get(), maximum=self.config["maximum"])
-            elif self.source.get() == "Arduino USB":
+            self.session_water_ms = tuple(water_test_ms(value.get()) for value in self.water_times[:len(INGREDIENTS)]) if mode == WATER else ()
+            source = self.source.get()
+            if source == "Feather Wi-Fi":
+                self.input_opening = InputOpening(WirelessInput, self.feather_host.get(), maximum=self.config["maximum"])
+            elif source in USB_SENSOR_SOURCES:
                 if mode != SCREEN and self.port.get().strip().upper() == self.pump_port.get().strip().upper():
                     raise ValueError("The USB sensor and pump controller need separate ports.")
-                self.serial = SerialInput(self.port.get(), self.config["baud"], self.config["maximum"])
+                self.input_opening = InputOpening(SerialInput, self.port.get(), self.config["baud"], self.config["maximum"])
         except ValueError as exc:
             self.status.set(str(exc))
             return
+        if self.input_opening:
+            self.input_started = time.monotonic()
+            self.input_mode = mode
+            self.status.set(f"Connecting to {source}…")
+            self._controls()
+        else:
+            self._begin_session(mode)
+
+    def _poll_input_opening(self, now):
+        if self.input_opening:
+            result = self.input_opening.poll()
+            if result is not None:
+                self.input_opening = None
+                self.serial, error = result
+                self.note(f"Signal / connection {'failed' if error else 'opened'} after {now - self.input_started:.2f} s")
+                if error:
+                    self.status.set(error)
+                else:
+                    self._begin_session(self.input_mode)
+
+    def _begin_session(self, mode):
         self.started, self.last_reading = time.monotonic(), None
         self.history.clear()
         self.reading_text.set("RAW —    BASELINE —    CHANGE —")
         self.durations = []
+        self.waiting_tune_started = False
         self.record_path = new_record_path(ROOT / "output" / "sessions")
         self.record_error = ""
         self.session_source, self.session_mode = self.source.get(), mode
@@ -352,41 +525,64 @@ class App:
         self.generated_lines = None
         self.accept_script = False
         self.note(f"Session / {self.session_source} → {mode}")
-        if self.fresh_scripts.get() and self.config.get("openai_key"):
-            if self.script_request and self.script_request.thread.is_alive():
-                self.note("Script / previous request still closing. Using house scripts.")
-            else:
-                self.previous_tactics = choose_tactics(self.previous_tactics)
-                self.script_request = ScriptRequest(self.config["openai_key"],
-                    self.config.get("openai_model", DEFAULT_MODEL), self.previous_tactics)
-                self.note("Script / requesting four fresh pitches")
-                self.accept_script = True
+        key = self.config.get("openai_key")
+        if self.fresh_scripts.get() and key:
+            model = self.config.get("openai_model", DEFAULT_MODEL)
+            self.intro_request = WritingRequest(generate_intro, key, model)
+            self.intro_deadline = time.monotonic() + 4
+            self.note(f"OpenAI / professor intro requested ({model})")
+            self.previous_tactics = choose_tactics(self.previous_tactics)
+            self.script_request = WritingRequest(generate_lines, key, model, self.previous_tactics)
+            self.note(f"OpenAI / three whispers requested ({model})")
+            self.accept_script = True
         else:
-            self.note("Script / using house scripts")
+            reason = "Fresh script is off" if key else "no OpenAI key configured"
+            self.note(f"OpenAI / house script selected ({reason})")
+        self.patient_timeline = PatientTimeline()
         self.session.start(self.started, spoken=not self.silent.get())
         self.copy_button.configure(state="disabled")
-        self.recipe_text.set("Four temptations are waiting. Your blend comes after the last round.")
+        self.recipe_text.set("The department will issue your prescription after the third stimulus.")
         self._set_row(None)
         self.output_text.set(f"{mode} · waiting for the recipe reveal")
         self._stage_changed()
 
-    def _stage_changed(self):
+    def _stage_changed(self, *, request_name=True):
+        self._update_patient_view()
         self.stage_text.set(self.session.stage.value)
         self.note(f"Session / {self.session.stage.value}")
+        key = self.config.get("openai_key")
+        if self.session.stage == Stage.REVEAL and request_name:
+            self._close_sensor()
+            if key:
+                amounts = self.session.recipe.amounts
+                lead = max(range(len(amounts)), key=amounts.__getitem__)
+                pitch = (self.session_scripts[lead]["text"] if lead < len(self.session_scripts)
+                         else INGREDIENTS[lead].pitch)
+                model = self.config.get("openai_model", DEFAULT_MODEL)
+                self.name_request = WritingRequest(generate_name, key, model, amounts, pitch, tuple(self.recent_names))
+                self.name_deadline = time.monotonic() + 4
+                self.note(f"OpenAI / prescription title requested ({model})")
+                self.line_text.set("The department is assessing your responses.")
+                self.status.set("Preparing your martini name…")
+                self._show_results()
+                self._save()
+                return
+            self._set_prescription_name()
         line = self.session.line()
         index = self.session.round_index
         if index == 0 and self.accept_script:
             self.accept_script = False
             try:
-                self.generated_lines, message = self.script_request.results.get_nowait()
+                self.generated_lines, outcome = self.script_request.result.get_nowait()
             except queue.Empty:
-                message = "OpenAI pitches were still pending at round one. Using house scripts."
-            self.note(f"Script / {message}")
+                outcome = "still pending at round one"
+            fallback = "" if self.generated_lines else " · using house whispers"
+            self.note(f"OpenAI / three whispers {outcome}{fallback}")
         if index is not None:
             approach = "house script"
             if self.generated_lines:
-                line = self.generated_lines[index]
-                approach = self.script_request.tactics[index]
+                line = self.generated_lines[INGREDIENTS[index].key]
+                approach = self.previous_tactics[index]
             self.session_scripts.append({"approach": approach, "text": line})
         self.line_text.set(line)
         self._show_results()
@@ -397,14 +593,20 @@ class App:
         self._save()
         if self.session.stage == Stage.REVEAL and self.session_mode in MOTOR_MODES:
             if self.session.spoken:
-                self.line_text.set("Connecting to the Uno for your blend…")
+                self.line_text.set("Connecting to the Uno for your prescription…")
             self._start_delivery(on_cue=self.session.spoken)
         elif self.session.stage == Stage.DISPENSE:
-            self.line_text.set("Your selected pumps run one at a time. The final whisper follows completion.")
+            self.line_text.set("Preparing your prescription. The pumps run one at a time.")
             if self.session_mode not in MOTOR_MODES:
                 self._start_delivery()
+            if self.session.stage == Stage.DISPENSE and self.session.spoken:
+                self.waiting_tune_started = self.voice.play_loop(ASSETS / WAITING_TUNE)
+                if self.waiting_tune_started:
+                    self.note("Audio / prescription waiting tune started")
         elif self.session.stage == Stage.COMPLETE:
-            self.status.set("Session complete. Results saved locally." + (" " + self.record_error if self.record_error else ""))
+            self.status.set("Appointment complete. Prescription saved locally." + (" " + self.record_error if self.record_error else ""))
+        elif self.session.stage == Stage.WELCOME and self.intro_request:
+            self.status.set("Preparing the professor’s introduction…")
         elif self.session.voice_pending:
             self._speak(line)
         elif self.silent.get():
@@ -414,20 +616,64 @@ class App:
             self.status.set("A quiet pause. Keep your fingers still.")
         self._controls()
 
+    def _poll_intro(self, now):
+        if not self.intro_request:
+            return
+        try:
+            intro, outcome = self.intro_request.result.get_nowait()
+        except queue.Empty:
+            if now < self.intro_deadline:
+                return
+            intro, outcome = None, "passed the 4 s show deadline"
+        self.intro_request = None
+        fallback = "" if intro else " · using the house introduction"
+        self.note(f"OpenAI / professor intro {outcome}{fallback}")
+        line = intro or self.session.line()
+        self.line_text.set(line)
+        if self.session.voice_pending:
+            self._speak(line)
+        else:
+            self.session.ready_at = max(self.session.ready_at, now + 4)
+            self.status.set("Silent rehearsal · professor introduction.")
+
+    def _set_prescription_name(self, proposed=None):
+        used = {name.casefold() for name in self.recent_names}
+        base = proposed if proposed and proposed.casefold() not in used else self.session.recipe.name
+        name = base
+        batch = 2
+        while name.casefold() in used:
+            name = f"{base} No. {batch}"
+            batch += 1
+        self.session.recipe = replace(self.session.recipe, name=name)
+        self.recent_names.appendleft(name)
+        if proposed and name != proposed:
+            self.note("OpenAI / title repeated · using a fresh house title")
+
     def _speak(self, line):
         index = self.session.round_index
-        voice_id = self.session_voices[index] if index is not None else self.voice.backend.voice_id
+        voice_id = self.professor_voice if index is None else self.session_voices[index]
         cue = VOICE_CUES.get(self.session.stage) if self.effects.get() else None
-        if not self.voice.speak(line, voice_id=voice_id, cue=cue):
+        filename = SOUND_CUES.get(self.session.stage)
+        if self.session.stage == Stage.FAREWELL and not self.waiting_tune_started:
+            filename = WAITING_TUNE
+        lead_in = ASSETS / filename if filename else None
+        if not self.voice.speak(line, voice_id=voice_id, cue=cue, steady=index is None, lead_in=lead_in):
             self.stop("Voice was still busy. Start a fresh session.")
         else:
+            self.voice_requested_at = time.monotonic()
             self.status.set("Preparing voice…")
 
     def _start_delivery(self, *, on_cue=False):
         try:
             enabled = self.config.get("real_pumps", False)
             self.durations = delivery_durations(self.session.recipe, self.session_mode,
-                self.config.get("pump_rates", ()), real_enabled=enabled, water_ms=self.session_water_ms)
+                self.config.get("pump_rates", ()), real_enabled=enabled, water_ms=self.session_water_ms,
+                pump_order=self.pump_order)
+            if self.session_mode == MOTORS:
+                rates = self.config["pump_rates"]
+                if any(abs(self.durations[self.pump_order.index(item.key)] * rate / 1000 - ml) > .05
+                       for item, rate, ml in zip(INGREDIENTS, rates, self.session.recipe.amounts)):
+                    self.note("Delivery / minimum pulse adjustment applied; estimates saved with recipe")
             self._save()
             if not self.delivery.start_delivery(self.pump_port.get().strip(), self.durations, self.session_mode,
                                                 real_enabled=enabled, on_cue=on_cue):
@@ -451,21 +697,25 @@ class App:
             return
         try:
             save_record(self.record_path, self.session, source=self.session_source, mode=self.session_mode,
-                        durations=self.durations, voices=self.session_voices, scripts=self.session_scripts)
+                        durations=self.durations, voices=self.session_voices, scripts=self.session_scripts,
+                        pump_rates=self.config.get("pump_rates", ()) if self.session_mode == MOTORS else (),
+                        pump_order=self.pump_order)
         except OSError:
             self.record_error = "Could not save the local results file; results remain visible in the window."
 
     def test_voice(self):
         if not self.session.active and not self.voice.busy:
-            self.voice.speak(TEST_LINE, cue="[exhales]" if self.effects.get() else None)
-            self.status.set("Testing the host through Windows default audio output…")
+            self.voice.speak(TEST_LINE, voice_id=self.professor_voice, steady=True,
+                             lead_in=ASSETS / SOUND_CUES[Stage.WELCOME])
+            self.voice_requested_at = time.monotonic()
+            self.status.set("Testing the professor and jingle through Windows default audio output…")
             self._controls()
 
     def edit_cast(self):
         if self.session.active or self.voice.busy or self.cast_window:
             return
         window = self.cast_window = tk.Toplevel(self.root)
-        window.title("Four temptations · voice cast")
+        window.title("Dirty Minds · diagnostic cast")
         window.configure(bg=BG)
         window.transient(self.root)
         window.grab_set()
@@ -477,7 +727,7 @@ class App:
             name = next((n for n, ident in self.voice_choices.items() if ident == self.round_voices[i]), self.round_voices[i])
             var = tk.StringVar(value=name)
             variables.append(var)
-            ttk.Label(frame, text=f"{i+1} · {item.character}").grid(row=i+1, column=0, sticky="w", padx=(0, 12), pady=7)
+            ttk.Label(frame, text=f"{i+1} · {item.name}").grid(row=i+1, column=0, sticky="w", padx=(0, 12), pady=7)
             ttk.Combobox(frame, textvariable=var, values=tuple(self.voice_choices), width=30).grid(row=i+1, column=1)
             def audition(index=i, variable=var):
                 if self.voice.busy:
@@ -486,11 +736,12 @@ class App:
                 ident = self.voice_choices.get(variable.get(), variable.get().strip())
                 if ident:
                     item = INGREDIENTS[index]
-                    excerpt = f"{item.introduction} {item.pitch.split('. ')[0].rstrip('.')}."
-                    self.voice.speak(excerpt, voice_id=ident, cue="[sighs]" if self.effects.get() else None)
+                    excerpt = ". ".join(item.pitch.split(". ")[:2]).rstrip(".") + "."
+                    if self.voice.speak(excerpt, voice_id=ident, cue=VOICE_CUES[ROUND_STAGES[index]] if self.effects.get() else None):
+                        self.voice_requested_at = time.monotonic()
             ttk.Button(frame, text="Listen", command=audition).grid(row=i+1, column=2, padx=(10, 0))
-        ttk.Label(frame, text="Try Natasha, Emily, AImee or Matthew with Whisper delivery on.\nChanges here last until restart. Save a cast with the VOICE_ settings in .env.",
-                  wraplength=610, foreground=MUTED).grid(row=5, column=0, columnspan=3, sticky="w", pady=12)
+        ttk.Label(frame, text="The professor handles the clinic announcements. Audition each voice with Whisper delivery on.\nSave your choices with the VOICE_ settings in .env.",
+                  wraplength=610, foreground=MUTED).grid(row=4, column=0, columnspan=3, sticky="w", pady=12)
         def finish():
             ids = [self.voice_choices.get(var.get(), var.get().strip()) for var in variables]
             if all(ids):
@@ -500,7 +751,7 @@ class App:
             window.destroy()
             self.cast_window = None
             self._controls()
-        ttk.Button(frame, text="Use this cast", command=finish).grid(row=6, column=0, columnspan=3, sticky="e")
+        ttk.Button(frame, text="Use this cast", command=finish).grid(row=5, column=0, columnspan=3, sticky="e")
         window.protocol("WM_DELETE_WINDOW", finish)
         window.bind("<Escape>", lambda event: self.voice.stop())
         self._controls()
@@ -508,21 +759,26 @@ class App:
     def set_voice_style(self):
         self.voice.backend.whisper = self.whisper.get()
 
-    def select_voice(self):
-        self.voice.backend.voice_id = self.voice_choices[self.voice_choice.get()]
-
     def _close_sensor(self):
         if self.serial:
             self.serial.close()
             self.serial = None
 
-    def stop(self, reason="Stopped. Start again for a fresh baseline and four new rounds."):
+    def stop(self, reason="Appointment stopped. Begin again for a fresh baseline."):
+        if self.input_opening:
+            self.input_opening.cancel()
+            self.input_opening = None
+            self.note("Signal / connection cancelled")
+        self.voice_requested_at = None
         self.voice.stop()
         self.delivery.stop()
+        self.name_request = self.intro_request = None
         self.accept_script = False
         if self.hardware_window:
+            if self.hardware_window.calibration:
+                self.hardware_window.calibration.stop()
             self.hardware_window.armed.set(False)
-            if self.hardware_window.sensor:
+            if self.hardware_window.monitoring:
                 self.hardware_window.stop_feather()
         if not self.session.active:
             self.status.set("Stop requested. Bench tests and audio are cancelled.")
@@ -530,6 +786,7 @@ class App:
             return
         self._close_sensor()
         self.session.stop()
+        self._update_patient_view()
         self._save()
         self.stage_text.set(Stage.STOPPED.value)
         self._set_row(None)
@@ -538,9 +795,12 @@ class App:
         self._controls()
 
     def _set_row(self, pump):
+        self.active_pump = pump
         for i, row in enumerate(self.cells, 1):
+            color = ROW_COLORS[INGREDIENTS.index(self.pump_ingredients[i - 1])] if pump == i else IDLE_CELL
             for cell in row:
-                self.led_canvas.itemconfigure(cell, fill=ROW_COLORS[i-1] if pump == i else IDLE_CELL)
+                self.led_canvas.itemconfigure(cell, fill=color)
+        self._update_patient_view()
 
     def _delivery_events(self, now):
         while True:
@@ -554,6 +814,8 @@ class App:
             self.note(f"{prefix} / {message}")
             if self.hardware_window:
                 self.hardware_window.uno_status.set(message)
+                if self.hardware_window.calibration:
+                    self.hardware_window.calibration.handle_event(kind, message)
             if not delivering:
                 continue
             if kind in ("error", "cancelled"):
@@ -571,11 +833,11 @@ class App:
                 else:
                     self._save()
             elif kind == "reply":
-                match = re.match(r"START pump=([1-4])\b", message)
+                match = re.match(r"START pump=([1-3])\b", message)
                 if match:
                     pump = int(match[1])
                     self._set_row(pump)
-                    self.output_text.set(f"{pump} · {INGREDIENTS[pump-1].name}\n{self.session_mode}")
+                    self.output_text.set(f"{pump} · {self.pump_ingredients[pump - 1].name}\n{self.session_mode}")
                 elif message.startswith("PUMP_DONE "):
                     self._set_row(None)
             else:
@@ -583,6 +845,11 @@ class App:
 
     def tick(self):
         now = time.monotonic()
+        gap = now - self.last_tick
+        self.last_tick = now
+        if gap >= .5:
+            self.note(f"UI / refresh delayed {gap:.2f} s")
+        self._poll_input_opening(now)
         while True:
             try:
                 generation, kind, message = self.voice.events.get_nowait()
@@ -590,9 +857,18 @@ class App:
                 break
             if generation != self.voice.generation:
                 continue
+            if kind in ("error", "playing") and self.voice_requested_at is not None:
+                outcome = "failed" if kind == "error" else "playback started"
+                self.note(f"Voice / {outcome} after {max(0, now - self.voice_requested_at):.2f} s")
+                self.voice_requested_at = None
             if kind == "error":
-                if self.session.active:
-                    self.stop(message + " Check Four voices, or rehearse silently.")
+                if self.session.stage == Stage.FAREWELL:
+                    self.voice.stop()
+                    self.session.playback_started()
+                    self.session.voice_finished(now)
+                    self.status.set("Prescription audio failed. The title is on screen. " + message)
+                elif self.session.active:
+                    self.stop(message + " Check Three voices, or rehearse silently.")
                 else:
                     self.status.set(message)
             elif kind == "playing":
@@ -605,6 +881,9 @@ class App:
                 self.status.set("A quiet moment to sense the response…" if self.session.collecting else message)
             else:
                 self.status.set(message)
+        if (self.voice_requested_at is not None and now - self.voice_requested_at >= 8
+                and self.status.get() == "Preparing voice…"):
+            self.status.set("Still waiting for voice audio. Open the debug log for timing.")
         self._delivery_events(now)
         if self.hardware_window:
             self.hardware_window.poll(now)
@@ -629,18 +908,41 @@ class App:
             if self.serial and ((self.last_reading is None and now-self.started > 6) or (self.last_reading is not None and now-self.last_reading > 3)):
                 self.stop("No valid GSR readings. Check the sensor connection, address and network.")
         try:
-            if self.session.tick(now, self.voice.busy):
+            self._poll_intro(now)
+            if self.name_request:
+                try:
+                    name, outcome = self.name_request.result.get_nowait()
+                except queue.Empty:
+                    name, outcome = None, "passed the 4 s show deadline"
+                    waiting = now < self.name_deadline
+                else:
+                    waiting = False
+                if not waiting:
+                    self.name_request = None
+                    fallback = "" if name else " · using a house title"
+                    self.note(f"OpenAI / prescription title {outcome}{fallback}")
+                    self._set_prescription_name(name)
+                    if self.session.ready_at is not None:
+                        self.session.ready_at = max(self.session.ready_at, now + 2)
+                    self._stage_changed(request_name=False)
+            elif not self.intro_request and self.session.tick(now, self.voice.busy):
                 self._stage_changed()
         except ValueError as exc:
             self.stop(str(exc))
         self.progress_bar["value"] = self.session.progress(now)
-        self._draw()
+        self._update_patient_view()
+        if not self.patient_window:
+            self._draw()
         self._controls()
         self.after_id = self.root.after(100, self.tick)
 
     def _draw(self):
-        self.canvas.delete("all")
         width, height = max(2, self.canvas.winfo_width()), self.canvas.winfo_height()
+        state = width, height, self.last_reading, self.session.baseline
+        if state == self.graph_state:
+            return
+        self.graph_state = state
+        self.canvas.delete("all")
         for fraction in (.25, .5, .75):
             self.canvas.create_line(0, height*fraction, width, height*fraction, fill=IDLE_CELL)
         maximum = self.config["maximum"]
@@ -661,13 +963,17 @@ class App:
 
     def close(self):
         self.root.after_cancel(self.after_id)
+        self.close_patient_view()
+        self.remember_connections()
         if self.hardware_window:
             self.hardware_window.close()
-        if self.session.active:
+        if self.session.active or self.input_opening:
             self.stop("Closing")
         self.delivery.close()
         self.voice.close()
         self._close_sensor()
+        self.note("App / closed")
+        self.debug.close()
         self.root.destroy()
 
 

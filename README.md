@@ -1,76 +1,156 @@
-# Dirty Minds / The Brine Bar
+# Dirty Minds · The Dirty Mind Diagnostic
 
-Run `setup.cmd` once, then open `run.cmd`. The app starts with simulated input and
-screen rehearsal. Move the response slider during each of the four rounds to
-rehearse a blend. The previous combined Feather pump and LED setup is documented
-below for historical reference.
+**Department of Inappropriate Responses**
 
-## Operate the show
+An experimental procedure for detecting inappropriate responses and prescribing
+corrective cocktails. The patient listens through headphones and relaxes with
+the sensor glove on. The installation maps skin-conductance changes to brine.
 
-Open **Hardware console** to enter the Feather IP, start or stop its live GSR
-monitor, select the Uno's USB port, and run **Check Uno**. The check reads the
-controller status and sends no motor commands. The event log includes sensor
-connection, session stages, script fallback, and controller replies.
+## Run an appointment
 
-For bench work with water, set the seconds for each channel in the console. The
-fields start at one second and accept 0.1 to 10 seconds. Check **Enable individual
-water tests** to test one pump on demand. The times stay set while the app is open.
+Run `setup.cmd` once, then open `run.cmd`. The app starts fullscreen with simulated
+input and Screen rehearsal. **F11** toggles fullscreen. **Esc** stops active
+speech, monitoring, or delivery. When idle in the operator view with the console
+closed, Esc exits fullscreen.
 
-Choose **Uno water rehearsal** under **Brine output** for an end-to-end run with
-the Feather or simulated input. Use water. The recipe selects the channels, and
-each selected pump runs for its configured time. A two-brine recipe runs those
-pumps sequentially. The displayed recipe volumes are for the eventual calibrated
-drink. **Calibrated pumps** uses measured flow rates and appears after you
-configure those rates and enable it in `.env`.
+Choose **Patient view** or press **F10** to cover the operator view with a black
+screen with a terminal log driven by the appointment stages. It shows **Taking
+baseline**, **Dirty 1 / 3** through **Dirty 3 / 3**, **Assessing responses**, and
+the active brine during pumping, and the drink title at discharge. Spoken lines and live measurements stay in the
+operator view. Press
+**F10** again to return to the operator view while the appointment continues.
+The activity stream follows the current round while hidden and resumes in place
+when reopened. Press **F8** to start a **New session** from either view when the
+app is idle. The shortcut keeps the patient view open.
+**Esc** still stops the active procedure from the patient display.
 
-For both physical output modes, the app connects to the Uno at the reveal and
-starts the sequence when playback of “The votes are in” begins. In a silent run,
-the Uno starts as soon as its connection is ready at the reveal. The farewell
-waits for both the reveal and the sequence to finish. **Stop all / Esc** cancels
-the monitor, audio, and active pump sequence. Close the separate Uno pump test
-window or Serial Monitor before running the show.
+Select headphones as the Windows default audio output. Use **Three voices → Listen**
+to audition each brine in Whisper mode. **Test headphones** plays the intake
+jingle and a professor test line. **Silent rehearsal** presents the script as text
+with audio muted. Select **New session** and move the simulated response slider during each of the
+three character rounds.
 
-Stop the bench monitor before starting a tasting. Select **Feather Wi-Fi** for
-session input to use the same IP from the console. The monitor and the tasting
-take turns connecting to the Feather. Qnect stays on its own manual controls.
+The procedure runs through patient intake, an eight-second baseline reading, three
+character whispers with quiet breaks, the cocktail prescription, delivery, and
+discharge. Each round scores signal change during playback and the following six
+seconds. Each score's share of the sum becomes that brine's share of the 15 ml
+total. For example, scores of 60, 30 and 10 give 9, 4.5 and 1.5 ml. If all three
+scores are zero, each brine gets 5 ml. Add the base spirit and dry vermouth separately.
 
-## Cast and fresh pitches
+## Cast and prescription names
 
-Pearl, Olive Twist, Pepper, and Dill With It introduce themselves before their
-pitches. In **Four voices**, audition Natasha (playful whisper), Emily (soft
-whisper), AImee (ASMR), or Matthew (deep whisper). The olive and augurk now
-default to Natasha and Emily. The previous Sarah and Marleen default IDs are
-mapped to the new voices on startup. Other custom IDs in `.env` are respected.
-Library voices require access in your ElevenLabs account.
+| Pump | Character | Default ElevenLabs voice |
+| --- | --- | --- |
+| 1 | The Olive · dry British understatement and impeccable manners | Trevor · British |
+| 2 | The Jalapeño · playful dares that turn up the heat | Ernesto · Mexican-American English |
+| 3 | The Pickled Onion · awkward intimacy, layers, and confessions | Kim from MindCastle · Dutch-accented English |
 
-**Whisper delivery** uses Eleven v4 by default. An explicit
-`ELEVENLABS_WHISPER_MODEL_ID` still takes precedence. **Breaths and sighs** adds
-one inline reaction in selected lines with v3 or v4. The **Test host** and
-**Listen** buttons let you hear those cues before a session. See the
-[ElevenLabs whisper catalog](https://elevenlabs.io/voice-library/whisper) and
-[breathing cue guide](https://elevenlabs.io/docs/help-center/product/core-capabilities/text-to-speech/can-you-make-voices-produce-the-sound-of-breathing).
+Daniel, a formal British voice, plays the dry professor at intake and discharge
+and reads the clinic instructions. Set `VOICE_PROFESSOR` to change that voice.
+The three brines keep their separate whisper voices. The original Australian
+Trevor Whisper voice is available in the cast menu. Library voices require access in
+your ElevenLabs account. Set `ELEVENLABS_API_KEY` in `.env` for speech. Save custom
+IDs using `VOICE_ONION`, `VOICE_OLIVE`, and `VOICE_JALAPENO`. The app upgrades
+previous bundled default IDs and preserves other custom IDs. Existing `.env`
+files are preserved. With **Whisper delivery** and **Breaths and sighs** on, each
+brine gets two breath or sigh cues and longer pauses between phrases. The professor
+keeps the steady delivery.
 
-Add `OPENAI_API_KEY` to `.env` and restart to enable **Fresh pitches**. OpenAI
-writes four short fictional pitches in one request while the introduction and
-baseline run. Each character gets a different approach from the previous
-request. The app uses house scripts if generation fails or the result arrives
-after round one begins. Fresh spoken lines need ElevenLabs synthesis, which can
-add a wait before each round. For prepared offline audio, switch off **Fresh
-pitches** and run `prepare_voices.py` with the same cast and settings you intend to
-use in the app.
+Add `OPENAI_API_KEY` to `.env` and restart. With **Fresh script** enabled, each
+**New session** requests a new deadpan professor opening and one new whisper for
+each brine. The professor explains the three-voice test. The anonymous brines
+each try to sell their own juice with slow, suggestive descriptions of liquid
+through tubing, pump pulses, and what their brine adds to the glass. Fresh scripts
+vary the selling angles. After the rounds, OpenAI uses the strongest-response pitch and the blend
+to make a punny martini title. Recent session titles are checked for repeats.
+If generation fails or runs past the show deadline, the appointment uses house
+copy or a house title. Turn off
+**Fresh script** and run `prepare_voices.py` with the chosen cast to cache the
+fixed house audio. The name can still be generated when Fresh script is off.
+The spoken title uses ElevenLabs when it is first announced.
 
-OpenAI receives the fictional cast and their approaches. ElevenLabs receives the
-lines and delivery settings. The app keeps the spoken or displayed pitches,
-approaches, and corresponding aggregate GSR scores together in the local session
-file for manual comparison. GSR is a skin-conductance signal affected by factors
-including movement and contact. This version does not use it to infer desire or
-train a model.
+The WAV files in `assets/` play locally. The intake jingle precedes the professor
+and a soft tone cues each of the three whispers. Round scoring starts with the
+spoken whisper. A short waiting tune plays during preparation, or as a brief
+lead-in if preparation has already finished. The professor announces the title.
+
+OpenAI receives the fictional cast briefs for the whispers and the leading pitch,
+brine volumes and recent cocktail titles for the name. The app saves the prescription name, recipe,
+character lines, aggregate responses, delivery mode and completion status to
+`output/sessions/`. A screen or water rehearsal is identified by its mode.
+The most recent Feather IP, sensor USB port and Uno USB port are remembered in
+`output/connections.json`. Those files stay local.
+
+## Operate the hardware
+
+Open **Hardware console** to enter the Feather IP, monitor live GSR, choose the
+Uno USB port and run **Check Uno**. Stop the live monitor before starting an
+appointment. The console and the appointment share the Feather IP.
+
+For bench work with water, the console starts at five seconds per channel.
+Enable individual water tests to pulse a channel on demand. Channel 4 is
+available for bench tests. Appointments use channels 1–3. Open **Pump
+assignments** to change which brine is connected to each Uno channel. The
+assignment is saved locally. Changing it disables calibrated pours until
+you measure the new assignment.
+
+**Uno water rehearsal** runs the chosen channels at their configured times.
+For **Calibrated pumps**, choose the Uno USB port in **Hardware console**, then
+open **Calibrate pumps**. Enable pump tests with a cup under the selected outlet.
+Use **Prime 2 s** as needed to fill the tubing and get a steady flow. Empty the
+cup, run a timed test, and enter the measured ml after the controller reports
+completion. Start at five seconds and aim for a sample of several ml. Repeat for
+each brine. For example, 8 ml in 5 seconds is 1.6 ml/s.
+
+Use the show brine and tubing for the final measurements. **Save calibration**
+stores the rates in `output/pump_calibration.json` and unlocks **Calibrated pumps**.
+Choose that mode separately to use the measured rates. Calibrations are tied
+to the pump assignments. Legacy `PUMP_ML_PER_SECOND` values in `.env` apply only
+with the original onion, olive, jalapeño channel order. The controller runs
+one pump at a time with a short gap. If a small share falls below the 100 ms minimum
+pulse, the app redistributes enough volume to reach the minimum while keeping
+the 15 ml total. The session log records the requested percentages, pump timings
+and estimated calibrated volumes.
+
+In both Uno modes, the app opens the controller at the reveal and starts the
+sequence when reveal playback starts. In a silent run, the sequence starts when
+the controller is ready. Discharge waits for both the reveal and the sequence
+to finish. Close the separate pump test window or Serial Monitor before starting.
+
+## Debug log and audio waits
+
+Select **Open debug log** in the operator view or Hardware console. The console
+shows live events and the file at `output/debug.log` keeps them between launches.
+Search for `OpenAI /` to see requests for the professor intro, three whispers and
+prescription title. Each result shows success, an HTTP error code, a network or
+response problem, or a missed show deadline, along with any fallback.
+Look for `UI / refresh delayed` to spot a stall and `Voice / playback started after`
+to see how long the app waited for audio. Sensor connection timing, delivery
+events and callback errors are also recorded.
+
+Fresh lines need new ElevenLabs audio, so the wait before the first word can
+be longer. For a live run with prepared audio, uncheck **Fresh script** and
+run `prepare_voices.py` ahead of time using the show cast and settings.
 
 ## Current hardware
 
-- **Feather HUZZAH32 + NeoPixel Wing:** GSR input over local Wi-Fi, live raw signal on the Wing.
+- **Feather HUZZAH32 + NeoPixel Wing:** GSR over USB serial or local Wi-Fi, with raw signal on the Wing.
 - **Arduino Uno:** four L298N pump channels over USB; screen rehearsal is the default.
-- **Qnect plug:** switch the complete ring device on/off manually with its app or button. Python control is not implemented; exact model and local integration remain to be confirmed. The plug does not reverse the motor.
+
+## Feather USB when Wi-Fi is unavailable
+
+1. With the glove off the participant, connect the Feather with a USB data cable.
+   Open [feather_gsr_serial.ino](arduino/feather_gsr_serial/feather_gsr_serial.ino)
+   in Arduino IDE. Select **Adafruit ESP32 Feather** and the Feather COM port,
+   then upload. The sketch uses the same A2 / GPIO34 input and NeoPixel Wing
+   connection as the Wi-Fi sketch.
+2. At **115200 baud**, Serial Monitor should show lines such as `GSR:512`.
+   Close Serial Monitor, then select **Feather USB** under Signal input in the
+   app. Choose the Feather COM port. Keep the pump Uno on its separate COM port.
+   The serial sketch sends 10-bit readings, so use `GSR_MAX=1023`.
+3. Bench-test with a suitable dummy input. Use a wired glove on a participant
+   only if the complete setup has verified body-contact electrical isolation.
+   Use **Simulated** for the show while that isolation is uncertain.
 
 ## Feather Wi-Fi test
 
@@ -85,15 +165,11 @@ Upload `arduino/uno_pump_controller/uno_pump_controller.ino` with **Arduino Uno*
 
 For each L298N, remove its ENA jumper; ENA is driven by its Uno pin with an external 10 kΩ pull-down to GND to keep it off during reset. For a one-direction test, IN1 = Uno 5 V and IN2 = GND. The motor supply is 6 V, separately sized for startup current; its negative, all driver grounds and Uno GND must be common. Confirm the exact L298N board's regulator jumper and logic supply with its documentation; do not connect 6 V to the Uno's 5 V pin. L298N voltage drop may make 6 V pumps weak. Start with one pump and water, powered separately; keep liquids away from electronics. Test physical power cutoff.
 
-Run `setup.cmd` in this copy, select its Uno COM port, and use the existing bench commands in the older guide below. After measuring each pump's actual ml/s with water, add `PUMP_ML_PER_SECOND` and `ENABLE_REAL_PUMPS=true` to this copy's `.env`. Calibration and a physical power cutoff are still required.
-
-## Qnect ring
-
-For now switch on/off in the Qnect app, separately from the experience. Confirm the ring device is safe and stable, its heaters are not unintentionally active, and that its original controls resume as expected after power is restored. A smart plug is not an emergency stop. Keep its mains electrics away from liquid.
+Run `setup.cmd` in this copy, select its Uno COM port, and use water for initial bench checks. Use **Calibrate pumps** in the Hardware console to measure the show flow rates. Keep the physical power cutoff accessible.
 
 ---
 
-## Previous guide — historical reference
+## Previous four-character app and combined Feather setup · historical reference
 
 # Dirty Minds
 

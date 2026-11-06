@@ -92,6 +92,44 @@ class SerialInput:
         self.thread.join(timeout=0.5)
 
 
+class InputOpening:
+    """Open a real sensor off the Tk thread, even when it is unreachable."""
+
+    def __init__(self, connect, *args, **kwargs):
+        self.lock = threading.Lock()
+        self.result = None
+        self.cancelled = False
+        self.thread = threading.Thread(target=self._connect, args=(connect, args, kwargs), daemon=True)
+        self.thread.start()
+
+    def _connect(self, connect, args, kwargs):
+        sensor = error = None
+        try:
+            sensor = connect(*args, **kwargs)
+        except ValueError as exc:
+            error = str(exc)
+        except Exception:
+            error = "Could not open the sensor input."
+        with self.lock:
+            if not self.cancelled:
+                self.result = sensor, error
+                return
+        if sensor:
+            sensor.close()
+
+    def poll(self):
+        with self.lock:
+            result, self.result = self.result, None
+        return result
+
+    def cancel(self):
+        with self.lock:
+            self.cancelled = True
+            result, self.result = self.result, None
+        if result and result[0]:
+            result[0].close()
+
+
 def list_ports():
     try:
         from serial.tools import list_ports as serial_ports

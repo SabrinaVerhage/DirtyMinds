@@ -22,10 +22,9 @@ class SessionTests(unittest.TestCase):
             self.assertTrue(session.tick(session.ready_at))
         self.assertEqual(session.stage, Stage.COMPLETE)
         self.assertEqual(session.baseline, 400)
-        self.assertEqual(len(session.results), 4)
+        self.assertEqual(len(session.results), 3)
         self.assertGreater(session.results[2].score, .9)
-        self.assertLess(session.results[3].score, .01)
-        self.assertEqual(session.recipe.amounts, (0, 0, 15, 0))
+        self.assertEqual(session.recipe.amounts, (0, 0, 15))
         self.assertTrue(session.delivery_complete)
         self.assertEqual(session.progress(100000), 100)
 
@@ -94,20 +93,22 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(len(session.responses), 1)
 
     def test_recipe_is_bounded_and_alcohol_fixed(self):
-        recipes = [make_recipe([x / 100, .2, .3, .4]) for x in range(-10, 111)]
+        recipes = [make_recipe([x / 100, .2, .3]) for x in range(-10, 111)]
         for recipe in recipes:
             self.assertAlmostEqual(recipe.brine_ml, 15)
             self.assertEqual((recipe.gin_ml, recipe.vermouth_ml), (50, 10))
-            self.assertLessEqual(sum(x > 0 for x in recipe.amounts), 2)
+            self.assertGreaterEqual(sum(x > 0 for x in recipe.amounts), 2)
         with self.assertRaises(ValueError):
-            make_recipe([math.nan, 0, 0, 0])
+            make_recipe([math.nan, 0, 0])
 
-    def test_blend_threshold_fallback_and_ties(self):
-        self.assertEqual(make_recipe([0, 0, 0, 0]).amounts, (0, 15, 0, 0))
-        self.assertEqual(make_recipe([.8, .1, .1, .1]).amounts, (15, 0, 0, 0))
-        self.assertEqual(make_recipe([.8, .8, .8, .8]).amounts, (7.5, 7.5, 0, 0))
-        self.assertEqual(make_recipe([.8, .6, .1, 0]).amounts, (8.6, 6.4, 0, 0))
-        self.assertEqual(make_recipe([.8, .59, .1, 0]).amounts, (15, 0, 0, 0))
+    def test_all_response_scores_set_the_proportions(self):
+        self.assertEqual(make_recipe([0, 0, 0]).amounts, (5, 5, 5))
+        self.assertEqual(make_recipe([.8, .8, .8]).amounts, (5, 5, 5))
+        self.assertEqual(make_recipe([.8, .1, .1]).amounts, (12, 1.5, 1.5))
+        for actual, expected in zip(make_recipe([.8, .6, .1]).amounts, (8, 6, 1)):
+            self.assertAlmostEqual(actual, expected)
+        for actual, expected in zip(make_recipe([.2, .4, .6]).amounts, (2.5, 5, 7.5)):
+            self.assertAlmostEqual(actual, expected)
 
     def test_bad_settings_and_premature_delivery(self):
         for value in (0, -1, math.nan, math.inf):

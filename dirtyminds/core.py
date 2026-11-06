@@ -1,4 +1,4 @@
-"""Four temptations, independent signal scores, and a bounded brine recipe."""
+"""Three diagnostic stimuli, independent signal scores, and a bounded brine recipe."""
 from dataclasses import asdict, dataclass
 from enum import Enum
 import math
@@ -9,72 +9,83 @@ import statistics
 class Ingredient:
     key: str
     name: str
-    pump: int
     voice_id: str
     voice_name: str
     character: str
     pitch: str
 
-    @property
-    def introduction(self):
-        return f"My name is {self.character}."
-
 
 INGREDIENTS = (
-    Ingredient("onion", "Silver onion", 1, "1ykC5GeLM4dP82qkyo91", "Nora", "Pearl",
-        "A silver onion with layers. Take one sip and I'll tell you a secret. "
-        "Sweet at first, then a little sharp. I never said it was a nice secret."),
-    Ingredient("olive", "Classic olive", 2, "PB6BdkFkZLbI39GHdnbQ", "Natasha", "Olive Twist",
-        "Of course I want some more. More velvet salt, more ice, and a little less innocence. "
-        "Your martini wore white. How very optimistic."),
-    Ingredient("jalapeno", "Jalapeño", 3, "A6TsrDqI2qlO9AWAfZHY", "Shanni", "Pepper",
-        "Your glass is freezing. Lucky for you, I brought a spark. "
-        "First comes a crisp little bite. Then the kind of heat that stays for another sip."),
-    Ingredient("pickle", "Dutch augurk", 4, "1cxc5c3E9K6F1wlqOJGV", "Emily", "Dill With It",
-        "A proper Dutch augurk. Crisp, cool, and a terrible influence on an innocent martini. "
-        "You call it trouble. I call it lekker."),
+    Ingredient("onion", "Pickled Onion", "sP3q7DZvU8X3maXCONzw", "Kim · Dutch English",
+        "Dutch-accented English. Awkwardly intimate, earnest and vulnerable. "
+        "Use layers, secrets or a confession that gets a little too personal.",
+        "Come a little closer. My juice is already slipping through the tube. "
+        "Sweet at first. Then the pump gives it one slow pulse. "
+        "That little sharp finish? I was hoping you would ask for more."),
+    Ingredient("olive", "Olive", "qMeZLxL57iwdz7D3XC3e", "Trevor · British",
+        "Masculine British English. Sophisticated, charming and emotionally unavailable. "
+        "Use dry understatement, elegant double meanings and impeccable manners.",
+        "Do leave a little room in your glass. "
+        "My juice takes the scenic route through the line. "
+        "One slow pulse brings a silky, salty finish. "
+        "A second would be our little indiscretion."),
+    Ingredient("jalapeno", "Jalapeño", "ZwLTvq6uCfb4W00YFl7F", "Ernesto · Mexican-American",
+        "Mexican-accented English. Bold, playful and provocative. "
+        "Tease with a dare that escalates from a small spark to lingering heat.",
+        "Wait for my juice to reach the pump. Hear that little pulse? "
+        "The first drop is bright. The next brings heat. "
+        "Try a sip. Tell me when it stops lingering."),
 )
 
 
+INGREDIENT_BY_KEY = {item.key: item for item in INGREDIENTS}
+DEFAULT_PUMP_ORDER = ("olive", "jalapeno", "onion")
+LEGACY_PUMP_ORDER = tuple(INGREDIENT_BY_KEY)
+
+
+PROFESSOR_VOICE_ID = "onwK4e9ZLuTAKqWW03F9"
+
+
 class Stage(str, Enum):
-    READY = "Ready"
-    WELCOME = "A dirty little introduction"
-    BASELINE_PROMPT = "Your baseline dirty"
-    CALIBRATE = "Finding your baseline · keep still"
-    ROUND_1 = "1 / 4 · Silver onion"
-    REST_1 = "A quiet breath"
-    ROUND_2 = "2 / 4 · Classic olive"
-    REST_2 = "A little pause"
-    ROUND_3 = "3 / 4 · Jalapeño"
-    REST_3 = "Let the heat settle"
-    ROUND_4 = "4 / 4 · Dutch augurk"
-    REVEAL = "Your dirty mind, your blend"
-    DISPENSE = "Making it dirty"
-    FAREWELL = "You deserve a dirty drink"
-    COMPLETE = "Your session is complete"
+    READY = "Awaiting patient"
+    WELCOME = "Patient intake"
+    BASELINE_PROMPT = "Baseline instructions"
+    CALIBRATE = "Baseline reading · keep still"
+    ROUND_1 = "1 / 3 · The Pickled Onion"
+    REST_1 = "Observation interval"
+    ROUND_2 = "2 / 3 · The Olive"
+    REST_2 = "Observation interval continued"
+    ROUND_3 = "3 / 3 · The Jalapeño"
+    REVEAL = "Assessing responses"
+    DISPENSE = "Preparing your prescription"
+    FAREWELL = "Discharge instructions"
+    COMPLETE = "Appointment complete"
     STOPPED = "Stopped"
 
 
 SEQUENCE = tuple(s for s in Stage if s not in (Stage.READY, Stage.COMPLETE, Stage.STOPPED))
-ROUND_STAGES = (Stage.ROUND_1, Stage.ROUND_2, Stage.ROUND_3, Stage.ROUND_4)
-REST_STAGES = (Stage.REST_1, Stage.REST_2, Stage.REST_3)
+ROUND_STAGES = (Stage.ROUND_1, Stage.ROUND_2, Stage.ROUND_3)
+REST_STAGES = (Stage.REST_1, Stage.REST_2)
+PROFESSOR_PROTOCOL = (
+    "Next, you will hear three voices. We will test what type of dirty you are. "
+    "You may stop the procedure at any time."
+)
 LINES = {
-    Stage.WELCOME: "Hello, dirty mind. Four pickles walked into a bar. "
-        "One of them is about to get into your martini. "
-        "Close your eyes if you like. Let's see what kind of dirty you take yours. "
-        "You can stop whenever you like.",
-    Stage.BASELINE_PROMPT: "First, I need to sense your baseline dirty. Rest your fingers on the contacts. "
-        "Stay still for a moment. Just you, me, and a little anticipation.",
-    Stage.REVEAL: "The votes are in. The brine has spoken. "
-        "Your very own dirty blend is ready. Let's make it.",
-    Stage.FAREWELL: "Thank you for sharing your dirty mind. You deserve a dirty drink. "
-        "Take your secret with you. Leave the glass with us.",
-    **{stage: f"{ingredient.introduction} {ingredient.pitch}" for stage, ingredient in zip(ROUND_STAGES, INGREDIENTS)},
+    Stage.WELCOME: "I am the professor on duty at the Department of Inappropriate Responses. "
+        "Today's study is double-blind, lightly stirred, and subject to peer re-pour. " + PROFESSOR_PROTOCOL,
+    Stage.BASELINE_PROMPT: "Relax and keep still for a moment. We will take a quiet baseline.",
+    Stage.REVEAL: "We have assessed your responses. Please wait while we prepare your prescription.",
+    Stage.FAREWELL: "Thank you. Please keep responding inappropriately.",
+    **{stage: ingredient.pitch for stage, ingredient in zip(ROUND_STAGES, INGREDIENTS)},
 }
-VOICE_CUES = {Stage.WELCOME: "[exhales]", **{
-    stage: cue for stage, cue in zip(ROUND_STAGES, ("[exhales]", "[sighs]", "[exhales]", "[sighs]"))
-}}
-TEST_LINE = "Welcome to Dirty Minds. If you can hear me, we're ready to begin."
+VOICE_CUES = {
+    Stage.ROUND_1: ("[inhales softly]", "[sighs]"),
+    Stage.ROUND_2: ("[exhales]", "[sighs softly]"),
+    Stage.ROUND_3: ("[inhales slowly]", "[exhales]"),
+}
+WAITING_TUNE = "prescription-wait.wav"
+SOUND_CUES = {Stage.WELCOME: "intake-jingle.wav", **dict.fromkeys(ROUND_STAGES, "test-ready.wav")}
+TEST_LINE = "This is the professor on duty. If you can hear me, the equipment has met our modest expectations."
 AFTER_SPEECH = {stage: 6 if stage in ROUND_STAGES else 8 if stage == Stage.CALIBRATE
                 else 4 if stage in REST_STAGES else 1 for stage in SEQUENCE}
 
@@ -106,32 +117,25 @@ class Recipe:
         return sum(self.amounts)
 
     def display(self):
-        brines = ", ".join(f"{ml:g} ml {item.name.lower()} brine"
+        brines = ", ".join(f"{ml:.2f} ml {item.name.lower()} brine ({ml / self.brine_ml:.1%})"
                            for item, ml in zip(INGREDIENTS, self.amounts) if ml)
         return (f"{self.name}\n50 ml gin (or vodka) + 10 ml dry vermouth\n{brines}\n"
                 "Stir with ice, strain cold, garnish to match.\n" + self.reason)
 
 
 def make_recipe(scores):
-    if len(scores) != 4:
-        raise ValueError("A recipe needs all four round scores.")
+    if len(scores) != len(INGREDIENTS):
+        raise ValueError("A prescription needs all three round scores.")
     scores = [clamp(value) for value in scores]
-    rank = sorted(range(4), key=lambda i: (-scores[i], (1, 0, 2, 3)[i]))
-    first, second = rank[:2]
-    amounts = [0.0] * 4
-    if scores[first] < 0.10:
-        amounts[1] = 15.0
-        name, reason = "The quiet classic", "Small responses: classic olive is the fallback."
-    elif scores[second] + 1e-12 >= scores[first] * 0.75:
-        amounts[first] = round(15 * scores[first] / (scores[first] + scores[second]), 1)
-        amounts[second] = round(15 - amounts[first], 1)
-        name = f"{INGREDIENTS[first].name} & {INGREDIENTS[second].name.lower()} affair"
-        reason = "A close second joins the strongest response in a 15 ml blend."
-    else:
-        amounts[first] = 15.0
-        name = f"A little {INGREDIENTS[first].name.lower()} trouble"
-        reason = "The strongest response chooses all 15 ml of brine."
-    return Recipe(name, tuple(amounts), reason)
+    total = math.fsum(scores)
+    if not total:
+        return Recipe("The Control Group", (5.0, 5.0, 5.0),
+                      "With no measured change, the three brines share 15 ml equally.")
+    house_names = ("The Layered Affair", "A Matter of Brine", "The Heat Hypothesis")
+    strongest = max(range(len(scores)), key=scores.__getitem__)
+    amounts = tuple(15.0 * (score / total) for score in scores)
+    return Recipe(house_names[strongest], amounts,
+                  "The three response scores determine the shares of 15 ml of brine.")
 
 
 class Session:
@@ -161,7 +165,7 @@ class Session:
 
     @property
     def needs_sensor(self):
-        return self.active and SEQUENCE.index(self.stage) <= SEQUENCE.index(Stage.ROUND_4)
+        return self.active and SEQUENCE.index(self.stage) <= SEQUENCE.index(ROUND_STAGES[-1])
 
     def _enter(self, stage, now):
         self.stage, self.entered = stage, now
@@ -217,11 +221,11 @@ class Session:
                 raise ValueError(f"Not enough sensor readings for round {index + 1}. Start a fresh session.")
             self.results.append(RoundResult(INGREDIENTS[index].key, statistics.fmean(self.responses),
                                             max(self.responses), len(self.responses)))
-            if index == 3:
+            if self.stage == ROUND_STAGES[-1]:
                 self.recipe = make_recipe([result.score for result in self.results])
         position = SEQUENCE.index(self.stage) + 1
         if self.stage == Stage.REVEAL and self.delivery_complete:
-            position += 1  # Delivery finished during the reveal, so go straight to farewell.
+            position += 1  # Delivery already finished during the reveal.
         self._enter(SEQUENCE[position] if position < len(SEQUENCE) else Stage.COMPLETE, now)
         return True
 
@@ -244,8 +248,10 @@ class Session:
         return 100 * (SEQUENCE.index(self.stage) + fraction) / len(SEQUENCE)
 
     def line(self):
-        return LINES.get(self.stage, "Keep still. Let the last little ripple settle." if self.stage in REST_STAGES
-                         else "Stay still while we find your baseline." if self.stage == Stage.CALIBRATE else "")
+        if self.stage == Stage.FAREWELL and self.recipe:
+            return f"Your prescription is {self.recipe.name}. {LINES[Stage.FAREWELL]}"
+        return LINES.get(self.stage, "Keep still while the last response settles." if self.stage in REST_STAGES
+                         else "Hold still while we record your baseline." if self.stage == Stage.CALIBRATE else "")
 
     def record(self):
         return {"stage": self.stage.value, "baseline": self.baseline, "gsr_span": self.span,

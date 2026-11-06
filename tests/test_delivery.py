@@ -14,8 +14,8 @@ from test_lights import FakeConnection
 
 class DeliveryTests(unittest.TestCase):
     def test_water_rehearsal_uses_timers_only_for_selected_channels(self):
-        recipe = make_recipe([.8, .6, 0, 0])
-        self.assertEqual(delivery_durations(recipe, WATER, water_ms=(2300, 500, 100, 300)), [2300, 500, 0, 0])
+        recipe = make_recipe([.8, .6, 0])
+        self.assertEqual(delivery_durations(recipe, WATER, water_ms=(2300, 500, 100, 300)), [2300, 0, 100, 0])
         self.assertEqual(water_test_ms("2.3"), 2300)
         for value in ("0", "10.1", "nan", "abc"):
             with self.assertRaises(ValueError):
@@ -68,15 +68,37 @@ class DeliveryTests(unittest.TestCase):
         self.assertTrue(connection.closed)
 
     def test_recipe_rows_and_real_calibration(self):
-        recipe = make_recipe([.8, .6, 0, 0])
-        self.assertEqual(delivery_durations(recipe, LEDS), [3440, 2560, 0, 0])
-        self.assertEqual(delivery_durations(recipe, SCREEN), [3440, 2560, 0, 0])
-        self.assertEqual(delivery_durations(recipe, MOTORS, [2, 1, 2, 2], real_enabled=True), [4300, 6400, 0, 0])
+        recipe = make_recipe([.8, .6, 0])
+        self.assertEqual(delivery_durations(recipe, LEDS), [2571, 0, 3429, 0])
+        self.assertEqual(delivery_durations(recipe, SCREEN), [2571, 0, 3429, 0])
+        self.assertEqual(delivery_durations(recipe, MOTORS, [2, 1, 2, 2], real_enabled=True), [6428, 0, 4285, 0])
+        self.assertEqual(delivery_durations(recipe, MOTORS, [2, 1, 2], real_enabled=True), [6428, 0, 4285, 0])
         with self.assertRaisesRegex(ValueError, "disabled"):
             delivery_durations(recipe, MOTORS, [2]*4)
         for rates in ([], [0]*4, [float('nan')]*4, [.001]*4, [100000]*4):
             with self.assertRaises(ValueError):
                 delivery_durations(recipe, MOTORS, rates, real_enabled=True)
+
+    def test_custom_order_applies_to_calibration_and_physical_test_timers(self):
+        recipe = make_recipe([.8, .6, 0])
+        order = ("jalapeno", "onion", "olive")
+        self.assertEqual(delivery_durations(recipe, WATER, water_ms=(1000, 2000, 3000),
+                                            pump_order=order), [0, 2000, 3000, 0])
+        self.assertEqual(delivery_durations(recipe, MOTORS, [2, 1, 2], real_enabled=True,
+                                            pump_order=order), [0, 4285, 6428, 0])
+
+    def test_tiny_shares_use_minimum_pulses_without_exceeding_total(self):
+        recipe = make_recipe([.001, .4, .599])
+        rates = (2.0, 1.0, 1.5)
+        durations = delivery_durations(recipe, MOTORS, rates, real_enabled=True)
+        self.assertEqual(durations[2], 100)
+        self.assertEqual(durations[3], 0)
+        self.assertTrue(all(ms >= 100 for ms in durations[:3]))
+        ingredient_durations = (durations[2], durations[0], durations[1])
+        doses = [ms * rate / 1000 for ms, rate in zip(ingredient_durations, rates)]
+        self.assertLessEqual(sum(doses), 15.0)
+        self.assertAlmostEqual(sum(doses), 15.0, places=2)
+        self.assertAlmostEqual(doses[1] / doses[2], .4 / .599, places=3)
 
     def test_led_delivery_uses_actual_client_preview_and_waits_for_done(self):
         connection = FakeConnection()
@@ -118,18 +140,20 @@ class DeliveryTests(unittest.TestCase):
         session.results = [RoundResult('onion', .8, .9, 100)]
         with tempfile.TemporaryDirectory() as directory:
             path = new_record_path(Path(directory))
-            save_record(path, session, source='Simulated', mode=LEDS, durations=[], voices=['id']*4)
+            save_record(path, session, source='Simulated', mode=LEDS, durations=[], voices=['id']*3)
             first = json.loads(path.read_text(encoding='utf-8'))
             self.assertEqual(first['rounds'][0]['score'], .8)
             self.assertIsNone(first['recipe'])
             self.assertNotIn('responses', first)
             self.assertNotIn('api_key', first)
-            session.recipe = make_recipe([.8, .2, .1, .1])
+            session.recipe = make_recipe([.8, .2, .1])
             session.stop()
-            save_record(path, session, source='Simulated', mode=LEDS, durations=[6000, 0, 0, 0], voices=['id']*4)
+            save_record(path, session, source='Simulated', mode=LEDS, durations=[6000, 0, 0, 0], voices=['id']*3)
             final = json.loads(path.read_text(encoding='utf-8'))
             self.assertEqual(final['stage'], 'Stopped')
             self.assertFalse(final['delivery_complete'])
             self.assertEqual(len(final['rounds']), 1)
-            self.assertEqual(final['recipe']['amounts'], [15, 0, 0, 0])
+            self.assertEqual(set(final['recipe']['brines_ml']), {'onion', 'olive', 'jalapeno'})
+            self.assertAlmostEqual(sum(final['recipe']['brine_percentages'].values()), 100, places=2)
+            self.assertAlmostEqual(sum(final['recipe']['amounts']), 15)
             self.assertFalse(path.with_suffix('.tmp').exists())

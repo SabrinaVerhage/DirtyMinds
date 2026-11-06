@@ -127,6 +127,22 @@ class VoiceTests(unittest.TestCase):
         self.assertEqual(processed[-2:], b"\0\0")
         self.assertEqual(processed[12000:12002], pcm[12000:12002])
 
+    def test_character_reactions_are_spaced_across_the_whisper(self):
+        self.voice.whisper = True
+        self.voice.whisper_model_id = "eleven_v4"
+        self.voice.whisper_pause_ms = 900
+        with patch("dirtyminds.voice.urllib.request.build_opener") as opener:
+            send = opener.return_value.open
+            send.side_effect = [FakeResponse(b"\0\0" * 100) for _ in range(3)]
+            path = self.voice.synthesize("Come closer. Follow the tubing. Taste the finish.",
+                                         cue=("[inhales softly]", "[sighs]"))
+        texts = [json.loads(call.args[0].data)["text"] for call in send.call_args_list]
+        self.assertEqual(texts, ["[whispering] [slowly] [inhales softly] Come closer.",
+                                 "[whispering] [sighs] Follow the tubing.",
+                                 "[whispering] Taste the finish."])
+        with wave.open(str(path), "rb") as wav:
+            self.assertEqual(wav.getnframes(), 300 + 2 * 27_600)
+
     def test_every_phrase_boundary_is_zero_even_without_a_pause(self):
         self.voice.whisper = True
         self.voice.whisper_pause_ms = 0
@@ -202,6 +218,34 @@ class VoiceTests(unittest.TestCase):
         self.assertEqual(observed, ['nora'])
         kinds = [event[1] for event in list(worker.events.queue)]
         self.assertLess(kinds.index('playing'), kinds.index('done'))
+
+    def test_cue_finishes_before_speech_starts(self):
+        played = []
+        options = []
+
+        class Backend:
+            whisper = True
+            def synthesize(self, text, *, cancelled=None):
+                options.append((self.whisper, self.steady))
+                return Path("speech.wav")
+
+        class Player:
+            def play(self, path):
+                played.append(path.name)
+                return 0
+            def stop(self):
+                pass
+
+        worker = VoiceWorker(Backend(), Player())
+        self.addCleanup(worker.close)
+        worker.speak("Welcome", steady=True, lead_in=Path("jingle.wav"))
+        deadline = time.monotonic() + 2
+        while worker.busy and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertEqual(played, ["jingle.wav", "speech.wav"])
+        self.assertEqual(options, [(False, True)])
+        self.assertEqual([event[1] for event in list(worker.events.queue)].count("playing"), 1)
+        self.assertTrue(worker.backend.whisper)
 
     def test_stop_during_api_request_prevents_late_playback(self):
         entered = threading.Event()

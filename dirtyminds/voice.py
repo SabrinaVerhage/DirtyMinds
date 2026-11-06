@@ -46,6 +46,7 @@ class ElevenVoice:
         self.model_id = model_id
         self.cache_dir = Path(cache_dir)
         self.whisper = whisper
+        self.steady = False
         self.whisper_model_id = whisper_model_id
         if not isinstance(whisper_pause_ms, int) or not 0 <= whisper_pause_ms <= 3000:
             raise ValueError("Whisper pause must be between 0 and 3000 milliseconds.")
@@ -56,10 +57,18 @@ class ElevenVoice:
         if not phrases or not text.strip():
             raise VoiceError("There is no text to speak.")
         model = self.whisper_model_id if self.whisper else self.model_id
+        pause_ms = self.whisper_pause_ms if self.whisper else 0
         if cue and model in ("eleven_v3", "eleven_v4"):
-            # Place the reaction beside dialogue so it doesn't need a separate clip.
-            index = min(1, len(phrases) - 1)
-            phrases[index] = f"{cue} {phrases[index]}"
+            if isinstance(cue, tuple):
+                # Reactions share existing phrase requests and stay beside the dialogue.
+                for index, reaction in zip((0, len(phrases) // 2), cue):
+                    phrases[index] = f"{reaction} {phrases[index]}"
+                if self.whisper:
+                    phrases[0] = f"[slowly] {phrases[0]}"
+                    pause_ms = min(3000, pause_ms + 250)
+            else:
+                index = min(1, len(phrases) - 1)
+                phrases[index] = f"{cue} {phrases[index]}"
         paths = []
         for phrase in phrases:
             if cancelled is not None and cancelled.is_set():
@@ -71,12 +80,12 @@ class ElevenVoice:
         # an audio fix also repairs existing caches without another paid request.
         digest = hashlib.sha256(json.dumps([
             PLAYBACK_VERSION, [p.name for p in paths], self.whisper,
-            self.whisper_pause_ms if self.whisper else 0,
+            pause_ms,
         ]).encode()).hexdigest()
         path = self.cache_dir / "playback" / f"{digest}.wav"
         if self._valid_cached_audio(path):
             return path
-        silence = b"\x00\x00" * (24000 * self.whisper_pause_ms // 1000)
+        silence = b"\x00\x00" * (24000 * pause_ms // 1000)
         frames = []
         for index, clip in enumerate(paths):
             if cancelled is not None and cancelled.is_set():
@@ -119,6 +128,9 @@ class ElevenVoice:
         voice_id, whisper = self.voice_id, self.whisper
         model = self.whisper_model_id if whisper else self.model_id
         settings = {"stability": 0.5 if model in ("eleven_v3", "eleven_v4") else 0.45, "similarity_boost": 0.75}
+        if self.steady:
+            settings["stability"] = 1.0 if model in ("eleven_v3", "eleven_v4") else 0.85
+            settings["speed"] = 0.95
         if whisper and model == "eleven_v3":
             settings["speed"] = 0.85
         payload = {
@@ -162,11 +174,14 @@ class ElevenVoice:
 
 
 class WindowsPlayer:
-    def play(self, path):
+    def play(self, path, *, loop=False):
         import winsound
         with wave.open(str(path), "rb") as wav:
             duration = wav.getnframes() / wav.getframerate()
-        winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+        flags = winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT
+        if loop:
+            flags |= winsound.SND_LOOP
+        winsound.PlaySound(str(path), flags)
         return duration
 
     def stop(self):
@@ -187,7 +202,7 @@ class VoiceWorker:
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
-    def speak(self, text, *, voice_id=None, cue=None):
+    def speak(self, text, *, voice_id=None, cue=None, steady=False, lead_in=None):
         with self.lock:
             if self.busy:
                 return False
@@ -195,7 +210,20 @@ class VoiceWorker:
             backend = copy.copy(self.backend)
             if voice_id is not None:
                 backend.voice_id = voice_id
-            self.jobs.put((self.generation, self.cancelled, text, backend, cue))
+            if steady:
+                backend.whisper = False
+                backend.steady = True
+            self.jobs.put((self.generation, self.cancelled, text, backend, cue, lead_in))
+            return True
+
+    def play_loop(self, path):
+        with self.lock:
+            if self.busy:
+                return False
+            try:
+                self.player.play(path, loop=True)
+            except (OSError, wave.Error, RuntimeError):
+                return False
             return True
 
     def stop(self):
@@ -215,7 +243,7 @@ class VoiceWorker:
             job = self.jobs.get()
             if job is None:
                 return
-            generation, cancelled, text, backend, cue = job
+            generation, cancelled, text, backend, cue, lead_in = job
             if cancelled.is_set():
                 continue
             error = None
@@ -223,6 +251,16 @@ class VoiceWorker:
                 self.events.put((generation, "status", "Preparing voice…"))
                 options = {"cue": cue} if cue else {}
                 path = backend.synthesize(text, cancelled=cancelled, **options)
+                if lead_in:
+                    try:
+                        with self.lock:
+                            if cancelled.is_set():
+                                continue
+                            lead_duration = self.player.play(lead_in)
+                        if cancelled.wait(lead_duration + 0.08):
+                            continue
+                    except (OSError, wave.Error, RuntimeError):
+                        self.events.put((generation, "status", "Sound cue unavailable. Continuing with speech."))
                 with self.lock:
                     if cancelled.is_set():
                         continue
