@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dirtyminds.app import App, IDLE_CELL
-from dirtyminds.core import INGREDIENTS, LINES, PROFESSOR_VOICE_ID, ROUND_STAGES, Stage, make_recipe
+from dirtyminds.core import INGREDIENTS, LINES, PROFESSOR_VOICE_ID, REST_STAGES, ROUND_STAGES, Stage, make_recipe
 from dirtyminds.delivery import LEDS, MOTORS, WATER, delivery_durations
 from dirtyminds.records import load_pump_calibration, load_pump_order
 
@@ -68,8 +68,14 @@ class FakeVoice:
 with tempfile.TemporaryDirectory() as directory, patch('dirtyminds.app.ROOT', Path(directory)):
     root = tk.Tk()
     app = App(root, {'span': 200, 'maximum': 1023, 'baud': 115200, 'port': '',
-                     'api_key': '', 'model_id': 'test', 'delivery_mode': LEDS})
+                     'api_key': '', 'model_id': 'test'})
     try:
+        assert app.source.get() == "Feather USB" and app.mode.get() == WATER
+        assert "Simulated" not in app.source_box["values"] and app.mode_box["values"] == (WATER,)
+        assert not app.silent.get()
+        app.silent.set(True)
+        app.mode.set(LEDS)
+        app.source.set("Simulated")
         app.voice.close()
         app.voice = FakeVoice(app.voice.backend)
         app.delivery = FakeDelivery()
@@ -228,7 +234,14 @@ with tempfile.TemporaryDirectory() as directory, patch('dirtyminds.app.ROOT', Pa
                     app.toggle_patient_view()
                     assert app.patient_timeline is timeline and timeline.counter > position
                     assert 'DIRTY 2 / 3' in app.patient_window.heading['text']
+                    assert app.patient_window.chart.find_withtag("response-trace")
+                    assert app.patient_window.window.cget("background") != "black"
                     assert app.voice.busy or app.session.playback_has_started
+                if stage in REST_STAGES:
+                    score = app.session.results[REST_STAGES.index(stage)].score
+                    assert app.patient_timeline.score == score
+                    if app.patient_window:
+                        assert app.patient_window.response.cget("text") == f"{score:.0%}  RESPONSE"
                 index = app.session.round_index
                 if index is not None:
                     app.intensity.set((15, 30, 95)[index])
@@ -243,6 +256,9 @@ with tempfile.TemporaryDirectory() as directory, patch('dirtyminds.app.ROOT', Pa
                     app.session.ready_at = time.monotonic()
                 if stage == Stage.DISPENSE and not delivered:
                     assert app.delivery.calls[-1] == ('COM7', delivery_durations(app.session.recipe, LEDS), LEDS)
+                    if app.patient_window:
+                        assert len(app.patient_window.chart.find_withtag("blend-bar")) == 3
+                    assert [row[0] for row in app.patient_timeline.blend] == ["Olive", "Jalapeño", "Pickled Onion"]
                     assert not app.session.delivery_complete
                     assert not app.session.tick(time.monotonic() + 100000)
                     if spoken:
@@ -263,6 +279,7 @@ with tempfile.TemporaryDirectory() as directory, patch('dirtyminds.app.ROOT', Pa
                     delivered = True
                 root.update()
                 time.sleep(.01)
+            assert all(stage in seen for stage in REST_STAGES)
             assert app.session.stage == Stage.COMPLETE, (app.session.stage, app.status.get(), list(app.events)[-14:])
             assert len(app.session.results) == 3
             assert app.session.delivery_complete
@@ -312,6 +329,9 @@ with tempfile.TemporaryDirectory() as directory, patch('dirtyminds.app.ROOT', Pa
             voice_count, cue_count = len(app.voice.calls), app.delivery.cues
             app._stage_changed()
             assert app.delivery.calls[-1] == ('COM7', [5000, 5000, 0, 0], WATER)
+            heading, rows = app._patient_blend()
+            assert heading == "BRINE TARGETS · PUMP TIME"
+            assert rows[0][2].endswith("target · 5 s") and rows[2][2].endswith("target · 0 s")
             assert app.delivery.on_cue and len(app.voice.calls) == voice_count
             call_count = len(app.delivery.calls)
             app.delivery.events.put(('ready', 'Uno ready'))

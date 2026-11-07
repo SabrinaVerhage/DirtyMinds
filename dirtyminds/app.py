@@ -11,7 +11,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from .core import (DEFAULT_PUMP_ORDER, INGREDIENTS, INGREDIENT_BY_KEY, LEGACY_PUMP_ORDER,
-                   PROFESSOR_VOICE_ID, ROUND_STAGES, SOUND_CUES, VOICE_CUES, WAITING_TUNE,
+                   PROFESSOR_VOICE_ID, REST_STAGES, ROUND_STAGES, SOUND_CUES, VOICE_CUES, WAITING_TUNE,
                    Session, Stage, TEST_LINE)
 from .delivery import DeliveryWorker, SCREEN, LEDS, MOTORS, MOTOR_MODES, PUMP_CHANNELS, WATER, delivery_durations, water_test_ms
 from .debug_log import DebugLog
@@ -135,13 +135,13 @@ class App:
             config["api_key"], self.professor_voice, config["model_id"], ROOT / ".cache" / "voice",
             whisper=config.get("whisper", True), whisper_model_id=config.get("whisper_model_id", "eleven_v4"),
             whisper_pause_ms=config.get("whisper_pause_ms", 900)))
-        self.source = tk.StringVar(value="Simulated")
+        self.source = tk.StringVar(value="Feather USB")
         old_port = config["port"]
         old_host = old_port if "." in old_port or ":" in old_port else ""
         self.port = tk.StringVar(value=self.saved_connections.get("gsr_usb", "" if old_host else old_port))
         self.feather_host = tk.StringVar(value=self.saved_connections.get(
             "feather_ip", config.get("feather_host") or old_host))
-        self.silent = tk.BooleanVar(value=not bool(config["api_key"]))
+        self.silent = tk.BooleanVar(value=False)
         self.whisper = tk.BooleanVar(value=config.get("whisper", True))
         self.effects = tk.BooleanVar(value=config.get("voice_effects", True))
         self.fresh_scripts = tk.BooleanVar(value=bool(config.get("openai_key")))
@@ -159,12 +159,14 @@ class App:
         self.ports = list_ports()
         default_pump = config.get("pump_port") or (self.ports[0] if len(self.ports) == 1 else "")
         self.pump_port = tk.StringVar(value=self.saved_connections.get("pump_usb", default_pump))
-        self.mode = tk.StringVar(value=config.get("delivery_mode", SCREEN))
+        default_mode = MOTORS if config.get("real_pumps") else WATER
+        self.mode = tk.StringVar(value=config.get("delivery_mode", default_mode))
         self.water_times = [tk.StringVar(value="5.0") for _ in range(PUMP_CHANNELS)]
         self.session_water_ms = ()
         self.intensity = tk.DoubleVar(value=40)
         self.stage_text = tk.StringVar(value=Stage.READY.value)
-        self.status = tk.StringVar(value=config.get("calibration_status") or "Ready for rehearsal.")
+        self.status = tk.StringVar(value=config.get("calibration_status")
+                                   or f"{self.source.get()} · {self.mode.get()}")
         self.reading_text = tk.StringVar(value="RAW —    BASELINE —    CHANGE —")
         self.line_text = tk.StringVar(value="An experimental procedure for detecting inappropriate responses and prescribing corrective cocktails.")
         self.recipe_text = tk.StringVar(value="Your prescription will appear after the three diagnostic stimuli.")
@@ -230,7 +232,7 @@ class App:
         def label(text):
             ttk.Label(controls, text=text, style="Kicker.TLabel").grid(sticky="w", pady=(7, 3))
         label("01   SIGNAL INPUT")
-        self.source_box = ttk.Combobox(controls, textvariable=self.source, values=("Simulated", *USB_SENSOR_SOURCES, "Feather Wi-Fi"), state="readonly", width=25)
+        self.source_box = ttk.Combobox(controls, textvariable=self.source, values=(*USB_SENSOR_SOURCES, "Feather Wi-Fi"), state="readonly", width=25)
         self.source_box.grid(sticky="ew")
         self.source_box.bind("<<ComboboxSelected>>", lambda event: self._controls())
         self.input_label = ttk.Label(controls, text="Input address", style="Muted.TLabel")
@@ -238,14 +240,9 @@ class App:
         self.port_box = ttk.Combobox(controls, textvariable=self.port, values=self.ports, width=25)
         self.port_box.grid(sticky="ew")
         self.port_source = None
-        ttk.Label(controls, text="Simulated response", style="Muted.TLabel").grid(sticky="w", pady=(5, 0))
-        self.slider = ttk.Scale(controls, from_=0, to=100, variable=self.intensity)
-        self.slider.grid(sticky="ew", pady=4)
         label("02   VOICE & SCRIPT")
         self.whisper_box = ttk.Checkbutton(controls, text="Whisper delivery", variable=self.whisper, command=self.set_voice_style)
         self.whisper_box.grid(sticky="w", pady=(5, 0))
-        self.silent_box = ttk.Checkbutton(controls, text="Silent rehearsal", variable=self.silent)
-        self.silent_box.grid(sticky="w")
         self.effects_box = ttk.Checkbutton(controls, text="Breaths and sighs", variable=self.effects)
         self.effects_box.grid(sticky="w")
         self.script_box = ttk.Checkbutton(controls, text="Fresh script · OpenAI" if self.config.get("openai_key")
@@ -258,7 +255,7 @@ class App:
         self.cast_button = ttk.Button(voice_actions, text="Three voices…", command=self.edit_cast)
         self.cast_button.pack(side="left", padx=(6, 0))
         label("03   BRINE OUTPUT")
-        modes = (SCREEN, WATER, MOTORS) if self.config.get("real_pumps") else (SCREEN, WATER)
+        modes = (WATER, MOTORS) if self.config.get("real_pumps") else (WATER,)
         self.mode_box = ttk.Combobox(controls, textvariable=self.mode, values=modes, state="readonly", width=25)
         self.mode_box.grid(sticky="ew")
         self.mode_box.bind("<<ComboboxSelected>>", lambda event: self._controls())
@@ -342,9 +339,39 @@ class App:
         activity = ""
         if self.active_pump and stage in (Stage.REVEAL, Stage.DISPENSE):
             activity = f"PUMPING {self.pump_ingredients[self.active_pump - 1].name.upper()}"
-        changed = self.patient_timeline.advance(stage, title, activity)
+        score = None
+        if stage in REST_STAGES:
+            index = REST_STAGES.index(stage)
+            if index < len(self.session.results):
+                score = self.session.results[index].score
+        heading, blend = self._patient_blend()
+        changed = self.patient_timeline.advance(stage, title, activity, score=score,
+                                                blend=blend, blend_heading=heading)
         if changed and self.patient_window:
             self.patient_window.render(self.patient_timeline)
+
+    def _patient_blend(self):
+        recipe = self.session.recipe
+        if not recipe or not self.durations or self.session.stage not in (
+                Stage.REVEAL, Stage.DISPENSE, Stage.FAREWELL, Stage.COMPLETE):
+            return "", ()
+        rates = self.config.get("pump_rates", ())
+        rows = []
+        for pump, item in enumerate(self.pump_ingredients):
+            index = INGREDIENTS.index(item)
+            seconds = self.durations[pump] / 1000
+            if self.session_mode == MOTORS:
+                ml = seconds * rates[index]
+                annotation = f"{ml:.1f} ml"
+            else:
+                ml = recipe.amounts[index]
+                annotation = f"{ml:.1f} ml"
+                if self.session_mode == WATER:
+                    annotation += f" target · {seconds:g} s"
+            rows.append((item.name, ml, annotation))
+        heading = {MOTORS: "ESTIMATED BRINE BY PUMP", WATER: "BRINE TARGETS · PUMP TIME"}.get(
+            self.session_mode, "BRINE TARGETS")
+        return heading, tuple(rows)
 
     def close_patient_view(self):
         if self.patient_window:
@@ -411,8 +438,7 @@ class App:
             self.input_label.configure(text=labels.get(source, "No device needed"))
         edit_input = not locked and source != "Simulated" and not (monitoring and source == "Feather Wi-Fi")
         self.port_box.configure(state="normal" if edit_input else "disabled")
-        self.slider.configure(state="normal" if source == "Simulated" else "disabled")
-        for widget in (self.whisper_box, self.silent_box, self.effects_box, self.test_button, self.cast_button):
+        for widget in (self.whisper_box, self.effects_box, self.test_button, self.cast_button):
             widget.configure(state="disabled" if locked else "normal")
         self.script_box.configure(state="normal" if not locked and self.config.get("openai_key") else "disabled")
         self.start_button.configure(state="disabled" if locked or monitoring else "normal")
@@ -454,8 +480,8 @@ class App:
         self.config["pump_rates"] = ()
         self.config["real_pumps"] = False
         if self.mode.get() == MOTORS:
-            self.mode.set(SCREEN)
-        self.mode_box.configure(values=(SCREEN, WATER))
+            self.mode.set(WATER)
+        self.mode_box.configure(values=(WATER,))
         self.status.set("Pump assignments saved. Calibrate the new assignment before dispensing.")
         if self.hardware_window:
             self.hardware_window.refresh_pump_labels()
@@ -464,7 +490,7 @@ class App:
         save_pump_calibration(ROOT / "output" / "pump_calibration.json", rates, self.pump_order)
         self.config["pump_rates"] = rates
         self.config["real_pumps"] = True
-        self.mode_box.configure(values=(SCREEN, WATER, MOTORS))
+        self.mode_box.configure(values=(WATER, MOTORS))
         self.status.set("Calibration saved. Select Calibrated pumps when ready to dispense.")
 
     def start(self):
@@ -477,9 +503,9 @@ class App:
         try:
             mode = self.mode.get()
             if mode not in (SCREEN, LEDS, *MOTOR_MODES) or (mode == MOTORS and not self.config.get("real_pumps")):
-                raise ValueError("Choose Screen rehearsal, Uno water rehearsal, or enabled calibrated pumps.")
+                raise ValueError("Choose Uno water rehearsal or calibrated pumps.")
             if mode != SCREEN and not self.pump_port.get().strip():
-                raise ValueError("Choose the Uno USB port in the hardware console, or select Screen rehearsal.")
+                raise ValueError("Choose the Uno USB port in the hardware console.")
             self.session_water_ms = tuple(water_test_ms(value.get()) for value in self.water_times[:len(INGREDIENTS)]) if mode == WATER else ()
             source = self.source.get()
             if source == "Feather Wi-Fi":
@@ -903,6 +929,11 @@ class App:
                     self.note("Signal / receiving valid sensor readings")
                 self.session.sample(raw)
                 self.history.append(self.session.smoothed)
+                if self.session.baseline is not None:
+                    self.patient_timeline.add_sample(self.session.signal)
+                elif self.session.calibration:
+                    change = abs(self.session.smoothed - self.session.calibration[0]) / self.session.span
+                    self.patient_timeline.add_sample(min(1.0, change))
                 baseline = "—" if self.session.baseline is None else f"{self.session.baseline:.0f}"
                 self.reading_text.set(f"RAW {raw:.0f}    BASELINE {baseline}    CHANGE {self.session.signal:.0%}")
             if self.serial and ((self.last_reading is None and now-self.started > 6) or (self.last_reading is not None and now-self.last_reading > 3)):

@@ -8,16 +8,21 @@ the sensor glove on. The installation maps skin-conductance changes to brine.
 
 ## Run an appointment
 
-Run `setup.cmd` once, then open `run.cmd`. The app starts fullscreen with simulated
-input and Screen rehearsal. **F11** toggles fullscreen. **Esc** stops active
+Run `setup.cmd` once, then open `run.cmd`. The app starts fullscreen on **Feather
+USB** with the saved ports. It selects **Calibrated pumps** if a matching
+calibration exists and **Uno water rehearsal** otherwise. Both modes use the Uno
+hardware when you start a session. Uno water rehearsal uses timed pulses. **F11** toggles fullscreen. **Esc** stops active
 speech, monitoring, or delivery. When idle in the operator view with the console
 closed, Esc exits fullscreen.
 
 Choose **Patient view** or press **F10** to cover the operator view with a black
 screen with a terminal log driven by the appointment stages. It shows **Taking
 baseline**, **Dirty 1 / 3** through **Dirty 3 / 3**, **Assessing responses**, and
-the active brine during pumping, and the drink title at discharge. Spoken lines and live measurements stay in the
-operator view. Press
+the active brine during pumping, and the drink title at discharge. A live GSR
+response trace and changing background follow the signal. Each two-second
+**Recording response** screen shows that round’s normalized score. The final
+bars show estimated calibrated volumes, or recipe targets alongside actual
+pump times in Uno water rehearsal. The spoken lines stay in the headphones. Press
 **F10** again to return to the operator view while the appointment continues.
 The activity stream follows the current round while hidden and resumes in place
 when reopened. Press **F8** to start a **New session** from either view when the
@@ -26,13 +31,12 @@ app is idle. The shortcut keeps the patient view open.
 
 Select headphones as the Windows default audio output. Use **Three voices → Listen**
 to audition each brine in Whisper mode. **Test headphones** plays the intake
-jingle and a professor test line. **Silent rehearsal** presents the script as text
-with audio muted. Select **New session** and move the simulated response slider during each of the
-three character rounds.
+jingle and a professor test line. Select **New session** when the patient is
+ready. The live controls offer physical sensor and pump modes.
 
 The procedure runs through patient intake, an eight-second baseline reading, three
-character whispers with quiet breaks, the cocktail prescription, delivery, and
-discharge. Each round scores signal change during playback and the following six
+character whispers with two-second response displays, the cocktail prescription,
+delivery, and discharge. Each round scores signal change during playback and the following six
 seconds. Each score's share of the sum becomes that brine's share of the 15 ml
 total. For example, scores of 60, 30 and 10 give 9, 4.5 and 1.5 ml. If all three
 scores are zero, each brine gets 5 ml. Add the base spirit and dry vermouth separately.
@@ -150,13 +154,12 @@ run `prepare_voices.py` ahead of time using the show cast and settings.
    The serial sketch sends 10-bit readings, so use `GSR_MAX=1023`.
 3. Bench-test with a suitable dummy input. Use a wired glove on a participant
    only if the complete setup has verified body-contact electrical isolation.
-   Use **Simulated** for the show while that isolation is uncertain.
 
 ## Feather Wi-Fi test
 
 1. Install the ESP32 board package and Adafruit NeoPixel library in Arduino IDE. Select the original **Adafruit ESP32 Feather**. In the sketch folder, create `wifi_secrets.h` with `#define WIFI_SSID "your network"` and `#define WIFI_PASSWORD "your password"` on separate lines. Use the same trusted 2.4 GHz local network as the PC with guest isolation disabled.
 2. Upload `feather_gsr_wifi.ino`; open Serial Monitor at 115200 to read `Feather IP`. For a first test use a potentiometer between Feather **3V** and **GND**, wiper to **GPIO34 / A2**. Never apply more than 3.3 V to the ADC. The bar shows raw ADC value.
-3. In the app select **Feather Wi-Fi**, enter that IP in the GSR field, select **Screen rehearsal**, and begin. TCP port 8765 streams values at about 20 Hz. Set `GSR_MAX=1023` and calibrate `GSR_SPAN` for the actual circuit. The app stops a session on a missing stream; it does not substitute simulated readings. The connection is unencrypted and unauthenticated: use a trusted private network, not the public internet.
+3. In the app select **Feather Wi-Fi**, enter that IP in the GSR field, select the Uno output mode, and begin. TCP port 8765 streams values at about 20 Hz. Set `GSR_MAX=1023` and calibrate `GSR_SPAN` for the actual circuit. The app stops a session on a missing stream; it does not substitute simulated readings. The connection is unencrypted and unauthenticated: use a trusted private network, not the public internet.
 4. Your DIY GSR circuit still needs a suitable current-limited, battery-powered, electrically isolated body-contact design. This code alone does not make electrodes safe. Do not connect a participant to a USB-powered or mains-connected prototype.
 
 ## Uno pump bench

@@ -56,6 +56,7 @@ class Stage(str, Enum):
     ROUND_2 = "2 / 3 · The Olive"
     REST_2 = "Observation interval continued"
     ROUND_3 = "3 / 3 · The Jalapeño"
+    REST_3 = "Final observation interval"
     REVEAL = "Assessing responses"
     DISPENSE = "Preparing your prescription"
     FAREWELL = "Discharge instructions"
@@ -65,7 +66,7 @@ class Stage(str, Enum):
 
 SEQUENCE = tuple(s for s in Stage if s not in (Stage.READY, Stage.COMPLETE, Stage.STOPPED))
 ROUND_STAGES = (Stage.ROUND_1, Stage.ROUND_2, Stage.ROUND_3)
-REST_STAGES = (Stage.REST_1, Stage.REST_2)
+REST_STAGES = (Stage.REST_1, Stage.REST_2, Stage.REST_3)
 PROFESSOR_PROTOCOL = (
     "Next, you will hear three voices. We will test what type of dirty you are. "
     "You may stop the procedure at any time."
@@ -87,7 +88,7 @@ WAITING_TUNE = "prescription-wait.wav"
 SOUND_CUES = {Stage.WELCOME: "intake-jingle.wav", **dict.fromkeys(ROUND_STAGES, "test-ready.wav")}
 TEST_LINE = "This is the professor on duty. If you can hear me, the equipment has met our modest expectations."
 AFTER_SPEECH = {stage: 6 if stage in ROUND_STAGES else 8 if stage == Stage.CALIBRATE
-                else 4 if stage in REST_STAGES else 1 for stage in SEQUENCE}
+                else 2 if stage in REST_STAGES else 1 for stage in SEQUENCE}
 
 
 def clamp(value):
