@@ -1,10 +1,25 @@
-# Dirty Minds · The Dirty Mind Diagnostic
+# Dirty Minds · A cocktail robot for Roboexotica
 
 **Department of Inappropriate Responses**
+*The Dirty Mind Diagnostic*
 
-An experimental procedure for detecting inappropriate responses and prescribing
-corrective cocktails. The patient listens through headphones and relaxes with
-the sensor glove on. The installation maps skin-conductance changes to brine.
+Dirty Minds is a cocktail robot built for Roboexotica, disguised as a very
+serious doctor's appointment. Its speciality? Scanning your dirty mind and
+prescribing a dirty martini recipe of your own.
+
+Take your place in the Department of Inappropriate Responses, relax, and let
+three seductive brine voices make their case. Each wants its own juice in your
+glass. A dry professor oversees the proceedings with all the gravity this
+questionable branch of science deserves.
+
+The robot pretends to read your mind while a sensor glove measures your skin's
+response. Those little reactions become a personalised blend of olive,
+jalapeño and pickled onion brines. The pumps prepare your blend, and a suitably
+punny cocktail name completes the prescription.
+
+The department takes its ridiculous diagnosis completely seriously.
+
+Please keep responding inappropriately.
 
 ## Run an appointment
 
